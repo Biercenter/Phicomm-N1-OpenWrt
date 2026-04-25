@@ -1,0 +1,32 @@
+# ... (前面的步骤保持不变)
+
+    - name: 6. 执行适配打包 (Remake)
+      run: |
+        cd ${{ env.WORK_DIR }}
+        mkdir -p openwrt-armsr
+        
+        # 自动定位生成的 rootfs
+        SOURCE_FILE=$(find output/ -name "openwrt-${{ github.event.inputs.openwrt_ver }}-armsr-armv8-generic-rootfs.tar.gz" | head -n 1)
+        cp "$SOURCE_FILE" "openwrt-armsr/openwrt-armsr-armv8-generic-rootfs.tar.gz"
+        
+        sudo chmod +x remake
+        # 执行打包
+        sudo ./remake -b s905d -k ${{ github.event.inputs.kernel_ver }} -p ${{ github.event.inputs.default_ip }}
+        
+        # 【新增】列出 out 目录内容，方便在日志里排查路径
+        echo "=== 检查生成的固件文件 ==="
+        ls -R out/
+
+    - name: 7. 上传固件至 Release
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: N1-${{ github.event.inputs.openwrt_ver }}-${{ github.run_id }}
+        name: Phicomm-N1-OpenWrt-${{ github.event.inputs.openwrt_ver }}
+        # 【优化】使用通配符匹配所有可能的压缩格式
+        files: |
+          ${{ env.WORK_DIR }}/out/*.img.gz
+          ${{ env.WORK_DIR }}/out/*.7z
+          ${{ env.WORK_DIR }}/out/*.xz
+          ${{ env.WORK_DIR }}/out/*.img
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
