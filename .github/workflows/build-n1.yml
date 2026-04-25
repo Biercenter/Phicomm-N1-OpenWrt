@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       openwrt_ver:
-        description: 'OpenWrt 版本 (如 25.12.2)'
+        description: 'OpenWrt 版本'
         required: true
         default: '25.12.2'
       kernel_ver:
-        description: '内核版本 (如 6.18.y)'
+        description: '内核版本'
         required: true
         default: '6.18.y'
       default_ip:
@@ -17,7 +17,6 @@ on:
         default: '192.168.100.1'
 
 env:
-  # 插件操作：前面加 - 为剔除，不加为增加
   PACKAGES: "-luci-app-ddns -luci-app-dockerman -luci-app-frpc -luci-app-frps -luci-app-upnp -luci-app-wol luci-app-ttyd luci-i18n-ttyd-zh-cn"
   LOCAL_PKGS_DIR: "pkgs"
   DISABLE_IPV6: "true"
@@ -26,7 +25,6 @@ env:
 jobs:
   build_firmware:
     runs-on: ubuntu-22.04
-    # 显式声明读写权限，解决 403 权限问题
     permissions:
       contents: write
 
@@ -49,7 +47,6 @@ jobs:
       - name: 4. 预置配置与 Docker 生成索引
         run: |
           cd ${{ env.WORK_DIR }}
-          # 创建初始化脚本
           mkdir -p config/imagebuilder/files/etc/uci-defaults
           cat <<EOF > config/imagebuilder/files/etc/uci-defaults/99-custom-settings
           #!/bin/sh
@@ -65,16 +62,10 @@ jobs:
           EOF
           chmod +x config/imagebuilder/files/etc/uci-defaults/99-custom-settings
 
-          # 处理本地 APK
           if [ -d "../${{ env.LOCAL_PKGS_DIR }}" ]; then
-              echo "检测到本地 pkgs 目录，开始处理..."
-              # 获取包名
               CUSTOM_PKGS=$(ls ../${{ env.LOCAL_PKGS_DIR }}/*.apk 2>/dev/null | xargs -n1 basename | cut -d'_' -f1 | tr '\n' ' ')
               echo "CUSTOM_PKGS=$CUSTOM_PKGS" >> $GITHUB_ENV
-              
-              # Docker 生成索引
               docker run --rm -v $(pwd)/../${{ env.LOCAL_PKGS_DIR }}:/my_pkgs alpine:latest sh -c "apk add --no-cache apk-tools && apk index -o /my_pkgs/APKINDEX.tar.gz /my_pkgs/*.apk"
-              
               LOCAL_REPO_PATH="file://$(readlink -f ../${{ env.LOCAL_PKGS_DIR }})"
               echo "LOCAL_REPO_URL=$LOCAL_REPO_PATH" >> $GITHUB_ENV
           fi
@@ -82,46 +73,56 @@ jobs:
       - name: 5. 运行 ImageBuilder 生成 Rootfs
         run: |
           cd ${{ env.WORK_DIR }}
-          
-          # 合并清单
           FINAL_PKGS="${{ env.PACKAGES }} ${{ env.CUSTOM_PKGS }}"
           sed -i "/make image/ s/PACKAGES=\"[^\"]*\"/PACKAGES=\"$FINAL_PKGS\"/" config/imagebuilder/imagebuilder.sh
-          
-          # 动态注入仓库
           (
             while [ ! -f "openwrt/repositories.conf" ]; do sleep 2; done
             echo "src custom_repo ${{ env.LOCAL_REPO_URL }}" | sudo tee -a openwrt/repositories.conf
           ) &
-          
           sudo chmod +x config/imagebuilder/imagebuilder.sh
           sudo ./config/imagebuilder/imagebuilder.sh "openwrt:${{ github.event.inputs.openwrt_ver }}"
 
-      - name: 6. 执行适配打包 (Remake)
+      - name: 6. 执行适配打包并筛选固件
         run: |
           cd ${{ env.WORK_DIR }}
           mkdir -p openwrt-armsr
           
-          # 定位 Rootfs
+          # 定位并拷贝 Rootfs
           SOURCE_FILE=$(find output/ -name "openwrt-${{ github.event.inputs.openwrt_ver }}-*-rootfs.tar.gz" | head -n 1)
-          if [ -z "$SOURCE_FILE" ]; then
-            echo "错误: 找不到 Rootfs 文件！"
-            exit 1
-          fi
           cp "$SOURCE_FILE" "openwrt-armsr/openwrt-armsr-armv8-generic-rootfs.tar.gz"
           
           sudo chmod +x remake
-          # 打包
+          # 开始打包
           sudo ./remake -b s905d -k ${{ github.event.inputs.kernel_ver }} -p ${{ github.event.inputs.default_ip }}
           
-          # 建立产物目录，避免 ls 报错
+          # --- 精准筛选逻辑 ---
           mkdir -p ./artifact/
-          find . -type f \( -name "*.img.gz" -o -name "*.7z" -o -name "*.xz" -o -name "*.img" \) -exec cp -v {} ./artifact/ \;
+          # 寻找生成的 img.gz 固件（排除掉 sha256, .txt, .7z 等干扰项）
+          RAW_FIRMWARE=$(find out/ -type f -name "*s905d*.img.gz" | head -n 1)
+          
+          if [ -n "$RAW_FIRMWARE" ]; then
+              # 获取当前日期
+              CUR_DATE=$(date +%Y.%m.%d)
+              # 获取具体的内核版本（解决 6.18.y 变成 6.18.24 的问题）
+              REAL_KERNEL=$(echo $RAW_FIRMWARE | grep -oE "k[0-9]+\.[0-9]+\.[0-9]+")
+              [ -z "$REAL_KERNEL" ] && REAL_KERNEL="k${{ github.event.inputs.kernel_ver }}"
+              
+              # 最终重命名并移动到发布目录
+              NEW_NAME="openwrt_official_amlogic_s905d_${REAL_KERNEL}_${CUR_DATE}.img.gz"
+              cp -v "$RAW_FIRMWARE" "./artifact/$NEW_NAME"
+              echo "✅ 已提取唯一固件: $NEW_NAME"
+          else
+            echo "❌ 错误: 未能在 out 目录找到 img.gz 固件！"
+            ls -R out/
+            exit 1
+          fi
 
-      - name: 7. 发布到 Release
+      - name: 7. 发布唯一固件到 Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: N1-${{ github.event.inputs.openwrt_ver }}-${{ github.run_id }}
           name: Phicomm-N1-${{ github.event.inputs.openwrt_ver }}
-          files: ${{ env.WORK_DIR }}/artifact/*
+          # 只上传 artifact 目录下的那一个文件
+          files: ${{ env.WORK_DIR }}/artifact/*.img.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
