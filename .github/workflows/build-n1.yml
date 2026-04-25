@@ -18,16 +18,14 @@ on:
 
 # ----------------- [ 全局变量配置中心 ] -----------------
 env:
-  # 需要卸载的官方插件 (前面加 '-' 表示不打包进入镜像)
-  # 需要增加的官方插件直接写名字 (例如 luci-app-ttyd)
+  # 插件管理：前面加 '-' 为剔除，不加为增加
   PACKAGES: "-luci-app-ddns -luci-app-dockerman -luci-app-frpc -luci-app-frps -luci-app-upnp -luci-app-wol luci-app-ttyd luci-i18n-ttyd-zh-cn"
   
   # 本地私有包目录 (相对于仓库根目录)
   LOCAL_PKGS_DIR: "pkgs"
   
-  # 是否禁用 IPv6 (true/false)
+  # 高级配置
   DISABLE_IPV6: "true"
-  
   TZ: Asia/Shanghai
 # ------------------------------------------------------
 
@@ -38,12 +36,11 @@ jobs:
     - name: 1. 检出代码
       uses: actions/checkout@v4
 
-    - name: 2. 准备构建环境 (修复 apk-tools 报错)
+    - name: 2. 准备构建环境 (避开 apt-get apk-tools 坑)
       run: |
-        sudo add-apt-repository universe -y
         sudo apt-get update
         sudo apt-get install -y git wget curl tar gzip xz-utils btrfs-progs unzip dosfstools \
-                                parted bc build-essential jq pigz qemu-user-static binfmt-support apk-tools
+                                parted bc build-essential jq pigz qemu-user-static binfmt-support
         sudo update-binfmts --enable
 
     - name: 3. 克隆并进入 ophub 仓库
@@ -51,16 +48,13 @@ jobs:
         git clone --depth 1 https://github.com/ophub/amlogic-s9xxx-openwrt.git
         echo "WORK_DIR=$(pwd)/amlogic-s9xxx-openwrt" >> $GITHUB_ENV
 
-    - name: 4. 预置自定义配置与本地私有包
+    - name: 4. 预置配置与 Docker 生成 APK 索引
       run: |
         cd ${{ env.WORK_DIR }}
-        # 创建初始化脚本目录
+        # 创建初始化脚本
         mkdir -p config/imagebuilder/files/etc/uci-defaults
-        
-        # 写入初始化逻辑 (IP/IPv6)
         cat <<EOF > config/imagebuilder/files/etc/uci-defaults/99-custom-settings
         #!/bin/sh
-        # 禁用 IPv6
         if [ "${{ env.DISABLE_IPV6 }}" = "true" ]; then
             uci set dhcp.lan.ra='disabled'
             uci set dhcp.lan.ndp='disabled'
@@ -73,33 +67,31 @@ jobs:
         EOF
         chmod +x config/imagebuilder/files/etc/uci-defaults/99-custom-settings
 
-        # 处理本地私有 APK 文件
+        # 处理本地私有包
         if [ -d "../${{ env.LOCAL_PKGS_DIR }}" ]; then
-            echo "检测到本地私有包目录，正在集成..."
-            # 获取所有私有包名并加入构建清单
+            echo "正在集成本地私有包..."
+            # 1. 提取包名
             CUSTOM_PKGS=$(ls ../${{ env.LOCAL_PKGS_DIR }}/*.apk 2>/dev/null | xargs -n1 basename | cut -d'_' -f1 | tr '\n' ' ')
             echo "CUSTOM_PKGS=$CUSTOM_PKGS" >> $GITHUB_ENV
             
-            # 为本地包生成索引，否则 ImageBuilder 无法识别仓库
-            cd ../${{ env.LOCAL_PKGS_DIR }}
-            apk index -o APKINDEX.tar.gz *.apk
-            cd ${{ env.WORK_DIR }}
+            # 2. 使用 Docker 生成索引 (关键修复点)
+            # 我们挂载本地 pkgs 目录到 Alpine 容器内执行 apk index
+            docker run --rm -v $(pwd)/../${{ env.LOCAL_PKGS_DIR }}:/my_pkgs alpine:latest sh -c "apk add --no-cache apk-tools && apk index -o /my_pkgs/APKINDEX.tar.gz /my_pkgs/*.apk"
             
-            # 创建本地仓库路径配置
-            LOCAL_REPO_URL="file://$(readlink -f ../${{ env.LOCAL_PKGS_DIR }})"
-            echo "LOCAL_REPO_URL=$LOCAL_REPO_URL" >> $GITHUB_ENV
+            # 3. 记录本地仓库路径
+            LOCAL_REPO_PATH="file://$(readlink -f ../${{ env.LOCAL_PKGS_DIR }})"
+            echo "LOCAL_REPO_URL=$LOCAL_REPO_PATH" >> $GITHUB_ENV
         fi
 
     - name: 5. 运行 ImageBuilder 生成 Rootfs
       run: |
         cd ${{ env.WORK_DIR }}
         
-        # 动态修改镜像包清单 (注入本地包名和剔除包名)
+        # 注入清单
         FINAL_PKGS="${{ env.PACKAGES }} ${{ env.CUSTOM_PKGS }}"
         sed -i "/make image/ s/PACKAGES=\"[^\"]*\"/PACKAGES=\"$FINAL_PKGS\"/" config/imagebuilder/imagebuilder.sh
         
-        # 注入本地仓库路径
-        # 在脚本运行期间动态修改 repositories.conf
+        # 注入仓库：使用后台进程动态修改解压后的配置文件
         (
           while [ ! -f "openwrt/repositories.conf" ]; do sleep 2; done
           echo "src custom_repo ${{ env.LOCAL_REPO_URL }}" | sudo tee -a openwrt/repositories.conf
@@ -113,17 +105,17 @@ jobs:
         cd ${{ env.WORK_DIR }}
         mkdir -p openwrt-armsr
         
-        # 移动并重命名生成的 rootfs
-        SOURCE_FILE="output/openwrt-${{ github.event.inputs.openwrt_ver }}-armsr-armv8-generic-rootfs.tar.gz"
+        # 自动定位生成的 rootfs (考虑不同版本路径)
+        SOURCE_FILE=$(find output/ -name "openwrt-${{ github.event.inputs.openwrt_ver }}-armsr-armv8-generic-rootfs.tar.gz" | head -n 1)
         cp "$SOURCE_FILE" "openwrt-armsr/openwrt-armsr-armv8-generic-rootfs.tar.gz"
         
         sudo chmod +x remake
         sudo ./remake -b s905d -k ${{ github.event.inputs.kernel_ver }} -p ${{ github.event.inputs.default_ip }}
 
-    - name: 7. 上传固件到 Release
+    - name: 7. 上传固件至 Release
       uses: softprops/action-gh-release@v2
       with:
-        tag_name: ${{ github.event.inputs.openwrt_ver }}-${{ github.event.inputs.kernel_ver }}-${{ github.run_id }}
+        tag_name: N1-${{ github.event.inputs.openwrt_ver }}-${{ github.run_id }}
         name: Phicomm-N1-OpenWrt-${{ github.event.inputs.openwrt_ver }}
         files: ${{ env.WORK_DIR }}/out/*.img.gz
       env:
