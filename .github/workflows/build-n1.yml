@@ -124,7 +124,7 @@ jobs:
           
           # 第四步：整理归档
           mkdir -p artifact
-          IMG=$(find ./out/ -name "*s905d*.img.gz" | head -n 1)
+          IMG=$(find ./openwrt/out/ -name "*s905d*.img.gz" | head -n 1)
           
           if [ -z "$IMG" ]; then
               echo "❌ 找不到编译好的固件文件！"
