@@ -69,13 +69,11 @@ jobs:
           DEBIAN_FRONTEND: noninteractive
         run: |
           sudo apt-get update -y
-          # 严格读取官方 Ubuntu 24.04 依赖表
           sudo apt-get install -y $(cat ${{ env.WORK_DIR }}/make-openwrt/scripts/ubuntu2404-make-openwrt-depends)
-          # 补齐跨架构核心组件与 GitHub CLI
           sudo apt-get install -y gh qemu-user-static binfmt-support
           sudo update-binfmts --enable
 
-      - name: 4. 动态下载已勾选的插件 (不再需要 Docker 生成索引)
+      - name: 4. 动态拉取第三方插件
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -98,17 +96,12 @@ jobs:
           [ "${{ inputs.include_ssr_plus }}" = "true" ] && download_latest_plugin "SSR-Plus-armsr-armv8"
           [ "${{ inputs.include_zerotier }}" = "true" ] && download_latest_plugin "ZeroTier-armsr-armv8"
 
-          # 提取包名准备注入
-          if ls ${{ env.LOCAL_PKGS_DIR }}/*.apk 1> /dev/null 2>&1; then
-              CUSTOM_PKGS=$(ls ${{ env.LOCAL_PKGS_DIR }}/*.apk | xargs -n1 basename | cut -d'_' -f1 | tr '\n' ' ')
-              echo "CUSTOM_PKGS=$CUSTOM_PKGS" >> $GITHUB_ENV
-          fi
-
       - name: 5. 注入自定义配置与本地 Packages
         run: |
           cd ${{ env.WORK_DIR }}
           mkdir -p config/imagebuilder/files/etc/uci-defaults
           
+          # 写入预设指令
           cat <<EOF > config/imagebuilder/files/etc/uci-defaults/99-custom-settings
           #!/bin/sh
           if [ "${{ inputs.disable_ipv6 }}" = "true" ]; then
@@ -124,13 +117,26 @@ jobs:
           EOF
           chmod +x config/imagebuilder/files/etc/uci-defaults/99-custom-settings
 
-          FINAL_PKGS="${{ env.PACKAGES }} ${{ env.CUSTOM_PKGS }}"
-          sed -i "/make image/ s/PACKAGES=\"[^\"]*\"/PACKAGES=\"$FINAL_PKGS\"/" config/imagebuilder/imagebuilder.sh
-          
-          # 【核心优化】遵循官方规范：在打包前将插件拷贝至 packages 目录，让 ImageBuilder 内部工具处理
-          if [ -n "${{ env.CUSTOM_PKGS }}" ]; then
-              sed -i '/make image/i \    mkdir -p packages && cp -f ${{ env.LOCAL_PKGS_DIR }}/*.apk packages/ 2>/dev/null || true' config/imagebuilder/imagebuilder.sh
+          # 【核心修复】将下载好的 apk 放入官方指定的 packages 目录
+          mkdir -p packages
+          cp -f ${{ env.LOCAL_PKGS_DIR }}/*.apk packages/ 2>/dev/null || true
+
+          # 【核心修复】从 .apk 内部的 .PKGINFO 元数据中精准提取真实的包名
+          CUSTOM_PKGS=""
+          if ls packages/*.apk 1> /dev/null 2>&1; then
+              echo "📦 正在解析 APK 元数据提取纯净包名..."
+              for file in packages/*.apk; do
+                  # 使用 tar 提取元数据，利用 grep 和 cut 剔除版本号和后缀，只留真实包名
+                  PKG_NAME=$(tar -xOf "$file" .PKGINFO 2>/dev/null | grep '^pkgname = ' | cut -d '=' -f 2 | tr -d ' ')
+                  if [ -n "$PKG_NAME" ]; then
+                      CUSTOM_PKGS="$CUSTOM_PKGS $PKG_NAME"
+                  fi
+              done
+              echo "✅ 提取完成，待注入的插件为: $CUSTOM_PKGS"
           fi
+
+          FINAL_PKGS="${{ env.PACKAGES }} $CUSTOM_PKGS"
+          sed -i "/make image/ s/PACKAGES=\"[^\"]*\"/PACKAGES=\"$FINAL_PKGS\"/" config/imagebuilder/imagebuilder.sh
 
       - name: 6. 运行 ImageBuilder
         run: |
@@ -143,12 +149,10 @@ jobs:
           cd ${{ env.WORK_DIR }}
           mkdir -p openwrt-armsr
           
-          # 【核心修复】根据你的提示，直接从 output 文件夹提取生成的 rootfs
-          echo "🔍 正在从 output 目录提取底包..."
+          echo "🔍 正在提取 ImageBuilder 生成的底包..."
           SOURCE_FILE=$(ls output/*rootfs.tar.gz 2>/dev/null | head -n 1)
           
           if [ -z "$SOURCE_FILE" ]; then
-              echo "⚠️ output 文件夹未找到，尝试在全盘搜索..."
               SOURCE_FILE=$(find . -type f -name "*rootfs.tar.gz" | grep -v "openwrt-armsr" | head -n 1)
           fi
           
