@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       openwrt_ver:
-        description: '🎯 OpenWrt SDK 版本 (例如: 25.12.2)'
+        description: '🎯 OpenWrt SDK 版本'
         required: true
         default: '25.12.2'
       kernel_ver:
-        description: '🐧 Amlogic 内核版本 (例如: 6.18.y)'
+        description: '🐧 Amlogic 内核版本'
         required: true
         default: '6.18.y'
       default_ip:
@@ -16,30 +16,26 @@ on:
         required: true
         default: '192.168.100.1'
       disable_ipv6:
-        description: '🚷 禁用 IPv6 (推荐纯 IPv4 环境勾选)'
+        description: '🚷 禁用 IPv6'
         required: true
         type: boolean
         default: true
-      # 移除了 custom_uci 输入框，界面更加清爽
       include_passwall:
-        description: '📦 自动集成: luci-app-passwall'
-        required: true
+        description: '📦 集成: luci-app-passwall'
         type: boolean
         default: true
       include_ssr_plus:
-        description: '📦 自动集成: luci-app-ssr-plus'
-        required: true
+        description: '📦 集成: luci-app-ssr-plus'
         type: boolean
         default: true
       include_zerotier:
-        description: '📦 自动集成: luci-app-zerotier'
-        required: true
+        description: '📦 集成: luci-app-zerotier'
         type: boolean
         default: true
 
 env:
-  PACKAGES: "-luci-app-ddns -luci-app-dockerman -luci-app-frpc -luci-app-frps -luci-app-upnp -luci-app-wol luci-app-ttyd luci-i18n-ttyd-zh-cn"
-  LOCAL_PKGS_DIR: "${{ github.workspace }}/pkgs"
+  LOCAL_PKGS_DIR: ${{ github.workspace }}/pkgs
+  WORK_DIR: ${{ github.workspace }}/amlogic-s9xxx-openwrt
   TZ: Asia/Shanghai
 
 jobs:
@@ -48,158 +44,100 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write
-      packages: write
-      actions: read
-
+    
     steps:
-      - name: 1. 检出当前仓库代码
+      - name: 1. 环境初始化
         uses: actions/checkout@v4
 
-      - name: 2. 克隆 Ophub 打包工具
+      - name: 2. 准备构建工具与依赖
         run: |
-          git clone --depth 1 https://github.com/ophub/amlogic-s9xxx-openwrt.git
-          echo "WORK_DIR=${{ github.workspace }}/amlogic-s9xxx-openwrt" >> $GITHUB_ENV
-
-      - name: 3. 安装官方依赖与跨架构支持
-        env:
-          DEBIAN_FRONTEND: noninteractive
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y $(cat ${{ env.WORK_DIR }}/make-openwrt/scripts/ubuntu2404-make-openwrt-depends)
-          sudo apt-get install -y gh qemu-user-static binfmt-support
+          git clone --depth 1 https://github.com/ophub/amlogic-s9xxx-openwrt.git ${WORK_DIR}
+          sudo apt-get update
+          sudo apt-get install -y $(cat ${WORK_DIR}/make-openwrt/scripts/ubuntu2404-make-openwrt-depends) gh qemu-user-static binfmt-support
           sudo update-binfmts --enable
 
-      - name: 4. 动态拉取第三方插件
+      - name: 3. 下载第三方插件
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          mkdir -p ${{ env.LOCAL_PKGS_DIR }}
-          
-          download_latest_plugin() {
-            local PREFIX=$1
-            echo "🔎 正在检索最新版本: [$PREFIX]..."
-            LATEST_TAG=$(gh api repos/${{ github.repository }}/releases --jq '.[].tag_name' | grep "^${PREFIX}" | head -n 1)
-            
-            if [ -n "$LATEST_TAG" ]; then
-              echo "✅ 成功匹配并下载: $LATEST_TAG"
-              gh release download "$LATEST_TAG" --repo "${{ github.repository }}" --dir ${{ env.LOCAL_PKGS_DIR }} --pattern "*.apk"
-            else
-              echo "⚠️ 未找到 [$PREFIX] 的 Release，跳过。"
-            fi
+          mkdir -p ${LOCAL_PKGS_DIR}
+          download_plugin() {
+            local TAG=$(gh api repos/${{ github.repository }}/releases --jq '.[].tag_name' | grep "^$1" | head -n 1)
+            [ -n "$TAG" ] && gh release download "$TAG" --repo "${{ github.repository }}" --dir ${LOCAL_PKGS_DIR} --pattern "*.apk"
           }
+          ${{ inputs.include_passwall }} && download_plugin "Passwall-armsr-armv8"
+          ${{ inputs.include_ssr_plus }} && download_plugin "SSR-Plus-armsr-armv8"
+          ${{ inputs.include_zerotier }} && download_plugin "ZeroTier-armsr-armv8"
 
-          [ "${{ inputs.include_passwall }}" = "true" ] && download_latest_plugin "Passwall-armsr-armv8"
-          [ "${{ inputs.include_ssr_plus }}" = "true" ] && download_latest_plugin "SSR-Plus-armsr-armv8"
-          [ "${{ inputs.include_zerotier }}" = "true" ] && download_latest_plugin "ZeroTier-armsr-armv8"
-
-          if ls ${{ env.LOCAL_PKGS_DIR }}/*.apk 1> /dev/null 2>&1; then
-              CUSTOM_PKGS=$(ls ${{ env.LOCAL_PKGS_DIR }}/*.apk | xargs -n1 basename | cut -d'_' -f1 | tr '\n' ' ')
-              echo "CUSTOM_PKGS=$CUSTOM_PKGS" >> $GITHUB_ENV
-          fi
-
-      - name: 5. 写入预设配置 & 注入自定义包
+      - name: 4. 配置 ImageBuilder 注入
         run: |
-          cd ${{ env.WORK_DIR }}
-          mkdir -p config/imagebuilder/files/etc/uci-defaults
+          # 准备配置目录
+          IB_FILES="${WORK_DIR}/config/imagebuilder/files"
+          mkdir -p ${IB_FILES}/etc/uci-defaults
           
-          cat <<EOF > config/imagebuilder/files/etc/uci-defaults/99-custom-settings
+          # 写入首启脚本
+          cat <<EOF > ${IB_FILES}/etc/uci-defaults/99-custom-settings
           #!/bin/sh
-          # --- 1. 动态生成 IPv6 禁用规则 ---
+          # 卸载多余插件
+          for pkg in luci-app-ddns luci-app-dockerman luci-app-frpc luci-app-frps luci-app-upnp luci-app-wol luci-app-ttyd; do
+              apk del -r "\$pkg" 2>/dev/null || true
+          done
+          # IPv6 设置
           if [ "${{ inputs.disable_ipv6 }}" = "true" ]; then
-              uci set dhcp.lan.ra='disabled'
-              uci set dhcp.lan.ndp='disabled'
-              uci set dhcp.lan.dhcpv6='disabled'
+              uci set dhcp.lan.ra='disabled'; uci set dhcp.lan.ndp='disabled'; uci set dhcp.lan.dhcpv6='disabled'
               uci delete network.lan.ip6assign
-              uci commit dhcp
-              uci commit network
+              uci commit
           fi
-          
-          # --- 2. 注入从 GitHub Variables 读取的通用配置 ---
+          # 注入自定义配置
           ${{ vars.CUSTOM_UCI }}
-          
-          # --- 3. 注入从 GitHub Secrets 读取的敏感配置 ---
           ${{ secrets.SECRET_UCI }}
-          
           exit 0
           EOF
-          chmod +x config/imagebuilder/files/etc/uci-defaults/99-custom-settings
+          chmod +x ${IB_FILES}/etc/uci-defaults/99-custom-settings
 
-          FINAL_PKGS="${{ env.PACKAGES }} ${{ env.CUSTOM_PKGS }}"
-          sed -i "/make image/ s/PACKAGES=\"[^\"]*\"/PACKAGES=\"$FINAL_PKGS\"/" config/imagebuilder/imagebuilder.sh
-          
-          if [ -n "${{ env.CUSTOM_PKGS }}" ]; then
-              sed -i '/make image/i \    mkdir -p packages && cp -f ${{ env.LOCAL_PKGS_DIR }}/*.apk packages/ 2>/dev/null || true' config/imagebuilder/imagebuilder.sh
+          # 解析 APK 包名并修改 ImageBuilder 脚本
+          cd ${WORK_DIR}
+          CUSTOM_PKGS=""
+          if [ -d "${LOCAL_PKGS_DIR}" ] && ls ${LOCAL_PKGS_DIR}/*.apk >/dev/null 2>&1; then
+              mkdir -p packages && cp ${LOCAL_PKGS_DIR}/*.apk packages/
+              for f in packages/*.apk; do
+                  NAME=$(tar -xOf "$f" .PKGINFO 2>/dev/null | awk -F ' = ' '/pkgname/ {print $2}')
+                  [ -n "$NAME" ] && CUSTOM_PKGS="\$CUSTOM_PKGS $NAME"
+              done
           fi
+          sed -i "/make image/ s/PACKAGES=\"/& $CUSTOM_PKGS /" config/imagebuilder/imagebuilder.sh
+          sed -i '/make image/i \mkdir -p packages && cp -f ${{ env.LOCAL_PKGS_DIR }}/*.apk packages/ 2>/dev/null || true' config/imagebuilder/imagebuilder.sh
 
-      - name: 6. 运行 ImageBuilder 生成 Rootfs
+      - name: 5. 执行构建与打包
         run: |
-          cd ${{ env.WORK_DIR }}
-          sudo chmod +x config/imagebuilder/imagebuilder.sh
+          cd ${WORK_DIR}
+          # 生成 Rootfs
           sudo ./config/imagebuilder/imagebuilder.sh "openwrt:${{ inputs.openwrt_ver }}"
-
-      - name: 7. N1 架构重构与固件提取
-        run: |
-          cd ${{ env.WORK_DIR }}
+          
+          # 寻找并移动 Rootfs
           mkdir -p openwrt-armsr
+          find output/ -name "*rootfs.tar.gz" -exec cp {} openwrt-armsr/openwrt-armsr-armv8-generic-rootfs.tar.gz \;
           
-          echo "🔍 正在全盘搜索生成的 rootfs.tar.gz..."
-          SOURCE_FILE=$(find . -type f -name "*rootfs.tar.gz" | grep -v "openwrt-armsr" | head -n 1)
-          
-          if [ -z "$SOURCE_FILE" ]; then
-              echo "❌ 严重错误: 未能找到生成的 rootfs.tar.gz 固件底包！"
-              find . -type f -name "*.tar.gz"
-              exit 1
-          fi
-          
-          echo "✅ 成功锁定底包位置: $SOURCE_FILE"
-          cp -v "$SOURCE_FILE" "openwrt-armsr/openwrt-armsr-armv8-generic-rootfs.tar.gz"
-          
+          # 打包 N1 镜像
           sudo chmod +x remake
           sudo ./remake -b s905d -k ${{ inputs.kernel_ver }} -p ${{ inputs.default_ip }}
           
-          mkdir -p ./artifact/
-          RAW_FIRMWARE=$(find . -type f -name "*s905d*.img.gz" | head -n 1)
-          
-          if [ -n "$RAW_FIRMWARE" ]; then
-              REAL_KERNEL=$(echo $RAW_FIRMWARE | grep -oE "k[0-9]+\.[0-9]+\.[0-9]+")
-              [ -z "$REAL_KERNEL" ] && REAL_KERNEL="k${{ inputs.kernel_ver }}"
-              
-              NEW_NAME="openwrt_official_amlogic_s905d_${REAL_KERNEL}_$(date +%Y.%m.%d).img.gz"
-              cp -v "$RAW_FIRMWARE" "./artifact/$NEW_NAME"
-              echo "🎉 最终固件已提取完成: $NEW_NAME"
-          else
-            echo "❌ 打包失败: remake 运行完毕但未找到 img.gz 固件！"
-            exit 1
-          fi
+          # 整理归档
+          mkdir -p artifact
+          IMG=$(find output -name "*s905d*.img.gz" | head -n 1)
+          NEW_NAME="openwrt_N1_${{ inputs.openwrt_ver }}_k${{ inputs.kernel_ver }}_$(date +%Y%m%d).img.gz"
+          cp "$IMG" "artifact/$NEW_NAME"
 
-      - name: 8. 生成 Markdown 发布报告
-        run: |
-          cat <<EOF > release_notes.md
-          ### 🚀 N1 专属固件构建成功！
-
-          - **设备模型**: Phicomm N1 (Amlogic s905d)
-          - **OpenWrt 版本**: \`${{ inputs.openwrt_ver }}\`
-          - **内核版本**: \`${{ inputs.kernel_ver }}\`
-          - **默认后台 IP**: \`${{ inputs.default_ip }}\`
-          - **IPv6 状态**: $( [ "${{ inputs.disable_ipv6 }}" = "true" ] && echo "🚷 已主动禁用" || echo "✅ 保持开启" )
-
-          ---
-          #### 📦 高级定制插件列表：
-          - **Passwall**: $( [ "${{ inputs.include_passwall }}" = "true" ] && echo "✅ 已集成" || echo "❌ 未选择" )
-          - **SSR-Plus**: $( [ "${{ inputs.include_ssr_plus }}" = "true" ] && echo "✅ 已集成" || echo "❌ 未选择" )
-          - **ZeroTier**: $( [ "${{ inputs.include_zerotier }}" = "true" ] && echo "✅ 已集成" || echo "❌ 未选择" )
-          
-          #### 🔧 配置注入状态：
-          - **Repository Variables**: $( [ -n "${{ vars.CUSTOM_UCI }}" ] && echo "✅ 已成功加载" || echo "⚠️ 未设置" )
-          - **Repository Secrets**: $( [ -n "${{ secrets.SECRET_UCI }}" ] && echo "✅ 已成功加载" || echo "⚠️ 未设置" )
-          EOF
-
-      - name: 9. 上传至 GitHub Releases
+      - name: 6. 发布 Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: N1-${{ inputs.openwrt_ver }}-${{ github.run_id }}
-          name: 🚀 Phicomm N1 终极定制版 (${{ inputs.openwrt_ver }})
           files: ${{ env.WORK_DIR }}/artifact/*.img.gz
-          body_path: release_notes.md
+          body: |
+            ### 🚀 N1 固件构建完成
+            - **OpenWrt:** ${{ inputs.openwrt_ver }}
+            - **Kernel:** ${{ inputs.kernel_ver }}
+            - **IP:** ${{ inputs.default_ip }}
+            - **默认密码:** password
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
