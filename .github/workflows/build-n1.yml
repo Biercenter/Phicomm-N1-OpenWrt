@@ -26,22 +26,23 @@ on:
         type: string
         default: "uci set system.@system[0].hostname='Phicomm-N1'; uci commit system"
       include_passwall:
-        description: '📦 自动拉取并集成: luci-app-passwall'
+        description: '📦 自动集成: luci-app-passwall'
         required: true
         type: boolean
         default: true
       include_ssr_plus:
-        description: '📦 自动拉取并集成: luci-app-ssr-plus'
+        description: '📦 自动集成: luci-app-ssr-plus'
         required: true
         type: boolean
         default: true
       include_zerotier:
-        description: '📦 自动拉取并集成: luci-app-zerotier'
+        description: '📦 自动集成: luci-app-zerotier'
         required: true
         type: boolean
         default: true
 
 env:
+  # 基础预装包列表 (精简掉不需要的服务，保留必备项)
   PACKAGES: "-luci-app-ddns -luci-app-dockerman -luci-app-frpc -luci-app-frps -luci-app-upnp -luci-app-wol luci-app-ttyd luci-i18n-ttyd-zh-cn"
   LOCAL_PKGS_DIR: "${{ github.workspace }}/pkgs"
   TZ: Asia/Shanghai
@@ -59,21 +60,21 @@ jobs:
       - name: 1. 检出当前仓库代码
         uses: actions/checkout@v4
 
-      - name: 2. 克隆 Ophub 打包工具仓库
+      - name: 2. 克隆 Ophub 打包工具
         run: |
           git clone --depth 1 https://github.com/ophub/amlogic-s9xxx-openwrt.git
-          echo "WORK_DIR=$(pwd)/amlogic-s9xxx-openwrt" >> $GITHUB_ENV
+          echo "WORK_DIR=${{ github.workspace }}/amlogic-s9xxx-openwrt" >> $GITHUB_ENV
 
-      - name: 3. 安装官方依赖与跨架构支持组件
+      - name: 3. 安装官方依赖与跨架构支持
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
           sudo apt-get update -y
-          # 1. 严格读取官方依赖表
+          # 严格读取官方要求的 Ubuntu 24.04 依赖表
           sudo apt-get install -y $(cat ${{ env.WORK_DIR }}/make-openwrt/scripts/ubuntu2404-make-openwrt-depends)
-          # 2. 【核心修复】手动补齐官方文件漏掉的 QEMU 跨架构核心组件与 gh 工具
+          # 手动补齐跨架构核心组件与 GitHub CLI
           sudo apt-get install -y gh qemu-user-static binfmt-support
-          # 3. 启用 QEMU 跨架构编译支持
+          # 启用 QEMU 跨架构编译支持
           sudo update-binfmts --enable
 
       - name: 4. 动态拉取第三方插件 & 生成本地源
@@ -82,6 +83,7 @@ jobs:
         run: |
           mkdir -p ${{ env.LOCAL_PKGS_DIR }}
           
+          # 通用函数：调用 GitHub API 获取最新 Release 并下载
           download_latest_plugin() {
             local PREFIX=$1
             echo "🔎 正在检索最新版本: [$PREFIX]..."
@@ -91,20 +93,24 @@ jobs:
               echo "✅ 成功匹配并下载: $LATEST_TAG"
               gh release download "$LATEST_TAG" --repo "${{ github.repository }}" --dir ${{ env.LOCAL_PKGS_DIR }} --pattern "*.apk"
             else
-              echo "⚠️ 未找到对应的 Release，跳过。"
+              echo "⚠️ 未找到 [$PREFIX] 的 Release，跳过。"
             fi
           }
 
+          # 根据网页选项决定是否下载
           [ "${{ inputs.include_passwall }}" = "true" ] && download_latest_plugin "Passwall-armsr-armv8"
           [ "${{ inputs.include_ssr_plus }}" = "true" ] && download_latest_plugin "SSR-Plus-armsr-armv8"
           [ "${{ inputs.include_zerotier }}" = "true" ] && download_latest_plugin "ZeroTier-armsr-armv8"
 
+          # 如果成功下载了插件，则动用 Wolfi 容器生成索引
           if ls ${{ env.LOCAL_PKGS_DIR }}/*.apk 1> /dev/null 2>&1; then
+              # 提取所有包名，用于后续 ImageBuilder 注入
               CUSTOM_PKGS=$(ls ${{ env.LOCAL_PKGS_DIR }}/*.apk | xargs -n1 basename | cut -d'_' -f1 | tr '\n' ' ')
               echo "CUSTOM_PKGS=$CUSTOM_PKGS" >> $GITHUB_ENV
               
-              echo "📦 正在使用 Alpine 容器生成本地 apk 源索引..."
-              docker run --rm -v ${{ env.LOCAL_PKGS_DIR }}:/my_pkgs alpine:latest sh -c "apk add --no-cache apk-tools && cd /my_pkgs && apk index --allow-untrusted -o APKINDEX.tar.gz *.apk"
+              # 【核心解法】调用原生支持 apk v3 格式的 Wolfi OS 容器
+              echo "📦 正在借助 Wolfi 容器生成最新版 apk 索引..."
+              docker run --rm -v ${{ env.LOCAL_PKGS_DIR }}:/my_pkgs cgr.dev/chainguard/wolfi-base sh -c "cd /my_pkgs && apk index --allow-untrusted -o APKINDEX.tar.gz *.apk"
               echo "LOCAL_REPO_URL=file://${{ env.LOCAL_PKGS_DIR }}" >> $GITHUB_ENV
           fi
 
@@ -113,6 +119,7 @@ jobs:
           cd ${{ env.WORK_DIR }}
           mkdir -p config/imagebuilder/files/etc/uci-defaults
           
+          # 注入开机自启脚本
           cat <<EOF > config/imagebuilder/files/etc/uci-defaults/99-custom-settings
           #!/bin/sh
           if [ "${{ inputs.disable_ipv6 }}" = "true" ]; then
@@ -129,17 +136,19 @@ jobs:
           EOF
           chmod +x config/imagebuilder/files/etc/uci-defaults/99-custom-settings
 
+          # 将自定义包名追加到官方脚本的打包参数中
           FINAL_PKGS="${{ env.PACKAGES }} ${{ env.CUSTOM_PKGS }}"
           sed -i "/make image/ s/PACKAGES=\"[^\"]*\"/PACKAGES=\"$FINAL_PKGS\"/" config/imagebuilder/imagebuilder.sh
           
+          # 【异步注入机制】Ophub 脚本会重置 openwrt 目录，需开启后台监听并精准注入本地源
           if [ -n "${{ env.LOCAL_REPO_URL }}" ]; then
             (
-              for i in {1..150}; do
+              for i in {1..120}; do
                 if [ -f "openwrt/repositories.conf" ]; then
+                  echo "🎯 侦测到打包环境初始化完毕，开始注入本地源..."
                   echo "${{ env.LOCAL_REPO_URL }}" | sudo tee -a openwrt/repositories.conf
                   sudo mkdir -p openwrt/packages
                   sudo cp -r ${{ env.LOCAL_PKGS_DIR }}/*.apk openwrt/packages/ 2>/dev/null || true
-                  echo "🎯 本地源注入成功！"
                   break
                 fi
                 sleep 2
@@ -150,55 +159,59 @@ jobs:
           sudo chmod +x config/imagebuilder/imagebuilder.sh
           sudo ./config/imagebuilder/imagebuilder.sh "openwrt:${{ inputs.openwrt_ver }}"
 
-      - name: 6. N1 本地化适配打包与提取
+      - name: 6. N1 架构重构与固件提取
         run: |
           cd ${{ env.WORK_DIR }}
           mkdir -p openwrt-armsr
           
+          # 提取 ImageBuilder 刚刚生成的通用版 rootfs
           SOURCE_FILE=$(find output/ -name "openwrt-${{ inputs.openwrt_ver }}-*-rootfs.tar.gz" | head -n 1)
           cp "$SOURCE_FILE" "openwrt-armsr/openwrt-armsr-armv8-generic-rootfs.tar.gz"
           
+          # 运行 Ophub 核心打包装载程序，适配 N1 (s905d) 芯片
           sudo chmod +x remake
           sudo ./remake -b s905d -k ${{ inputs.kernel_ver }} -p ${{ inputs.default_ip }}
           
+          # 寻找并重命名最终固件文件
           mkdir -p ./artifact/
           RAW_FIRMWARE=$(find . -type f -name "*s905d*.img.gz" | head -n 1)
           
           if [ -n "$RAW_FIRMWARE" ]; then
+              # 智能提取实际使用的内核版本
               REAL_KERNEL=$(echo $RAW_FIRMWARE | grep -oE "k[0-9]+\.[0-9]+\.[0-9]+")
               [ -z "$REAL_KERNEL" ] && REAL_KERNEL="k${{ inputs.kernel_ver }}"
               
               NEW_NAME="openwrt_official_amlogic_s905d_${REAL_KERNEL}_$(date +%Y.%m.%d).img.gz"
               cp -v "$RAW_FIRMWARE" "./artifact/$NEW_NAME"
           else
-            echo "❌ 打包失败: 未找到最终 img.gz 固件！"
+            echo "❌ 打包失败: 未能在构建目录找到 img.gz 固件！"
             exit 1
           fi
 
-      - name: 7. 生成发布报告
+      - name: 7. 生成 Markdown 发布报告
         run: |
           cat <<EOF > release_notes.md
           ### 🚀 N1 专属固件构建成功！
 
-          - **设备**: Phicomm N1 (Amlogic s905d)
-          - **OpenWrt**: `${{ inputs.openwrt_ver }}`
-          - **Kernel**: `${{ inputs.kernel_ver }}`
-          - **默认 IP**: `${{ inputs.default_ip }}`
-          - **IPv6**: $( [ "${{ inputs.disable_ipv6 }}" = "true" ] && echo "🚷 已禁用" || echo "✅ 已开启" )
+          - **设备模型**: Phicomm N1 (Amlogic s905d)
+          - **OpenWrt 版本**: \`${{ inputs.openwrt_ver }}\`
+          - **内核版本**: \`${{ inputs.kernel_ver }}\`
+          - **默认后台 IP**: \`${{ inputs.default_ip }}\`
+          - **IPv6 状态**: $( [ "${{ inputs.disable_ipv6 }}" = "true" ] && echo "🚷 已主动禁用" || echo "✅ 保持开启" )
 
           ---
-          #### 📦 定制插件列表：
-          - **Passwall**: $( [ "${{ inputs.include_passwall }}" = "true" ] && echo "✅" || echo "❌" )
-          - **SSR-Plus**: $( [ "${{ inputs.include_ssr_plus }}" = "true" ] && echo "✅" || echo "❌" )
-          - **ZeroTier**: $( [ "${{ inputs.include_zerotier }}" = "true" ] && echo "✅" || echo "❌" )
+          #### 📦 高级定制插件列表：
+          - **Passwall**: $( [ "${{ inputs.include_passwall }}" = "true" ] && echo "✅ 已深度集成" || echo "❌ 未选择" )
+          - **SSR-Plus**: $( [ "${{ inputs.include_ssr_plus }}" = "true" ] && echo "✅ 已深度集成" || echo "❌ 未选择" )
+          - **ZeroTier**: $( [ "${{ inputs.include_zerotier }}" = "true" ] && echo "✅ 已深度集成" || echo "❌ 未选择" )
           
-          #### 🔧 自定义初始化脚本：
+          #### 🔧 用户注入的初始化脚本：
           \`\`\`bash
           ${{ inputs.custom_uci }}
           \`\`\`
           EOF
 
-      - name: 8. 上传至 GitHub Release
+      - name: 8. 上传至 GitHub Releases
         uses: softprops/action-gh-release@v2
         with:
           tag_name: N1-${{ inputs.openwrt_ver }}-${{ github.run_id }}
