@@ -59,23 +59,21 @@ jobs:
       - name: 1. 检出当前仓库代码
         uses: actions/checkout@v4
 
-      # 【核心优化 1】先克隆官方打包仓库，以便后续读取官方依赖表
       - name: 2. 克隆 Ophub 打包工具仓库
         run: |
           git clone --depth 1 https://github.com/ophub/amlogic-s9xxx-openwrt.git
           echo "WORK_DIR=$(pwd)/amlogic-s9xxx-openwrt" >> $GITHUB_ENV
 
-      # 【核心优化 2】严格按照官方文档读取 24.04 专属依赖并安装
-      - name: 3. 安装官方指定的构建环境依赖
+      - name: 3. 安装官方依赖与跨架构支持组件
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
           sudo apt-get update -y
-          # 读取刚才克隆下来的 amlogic 仓库中的官方依赖列表
+          # 1. 严格读取官方依赖表
           sudo apt-get install -y $(cat ${{ env.WORK_DIR }}/make-openwrt/scripts/ubuntu2404-make-openwrt-depends)
-          # 额外安装供我们拉取 Release 的 GitHub CLI (gh)
-          sudo apt-get install -y gh
-          # 启用 binfmt 支持（QEMU 交叉编译需要）
+          # 2. 【核心修复】手动补齐官方文件漏掉的 QEMU 跨架构核心组件与 gh 工具
+          sudo apt-get install -y gh qemu-user-static binfmt-support
+          # 3. 启用 QEMU 跨架构编译支持
           sudo update-binfmts --enable
 
       - name: 4. 动态拉取第三方插件 & 生成本地源
@@ -101,12 +99,10 @@ jobs:
           [ "${{ inputs.include_ssr_plus }}" = "true" ] && download_latest_plugin "SSR-Plus-armsr-armv8"
           [ "${{ inputs.include_zerotier }}" = "true" ] && download_latest_plugin "ZeroTier-armsr-armv8"
 
-          # 检查是否下载了包，生成索引
           if ls ${{ env.LOCAL_PKGS_DIR }}/*.apk 1> /dev/null 2>&1; then
               CUSTOM_PKGS=$(ls ${{ env.LOCAL_PKGS_DIR }}/*.apk | xargs -n1 basename | cut -d'_' -f1 | tr '\n' ' ')
               echo "CUSTOM_PKGS=$CUSTOM_PKGS" >> $GITHUB_ENV
               
-              # 【稳定方案】使用 Docker Alpine 独立生成索引，无视 Ubuntu 本身的依赖问题
               echo "📦 正在使用 Alpine 容器生成本地 apk 源索引..."
               docker run --rm -v ${{ env.LOCAL_PKGS_DIR }}:/my_pkgs alpine:latest sh -c "apk add --no-cache apk-tools && cd /my_pkgs && apk index --allow-untrusted -o APKINDEX.tar.gz *.apk"
               echo "LOCAL_REPO_URL=file://${{ env.LOCAL_PKGS_DIR }}" >> $GITHUB_ENV
@@ -157,19 +153,14 @@ jobs:
       - name: 6. N1 本地化适配打包与提取
         run: |
           cd ${{ env.WORK_DIR }}
-          
-          # 按照官方指南要求，创建 openwrt-armsr 文件夹
           mkdir -p openwrt-armsr
           
-          # 定位刚才 ImageBuilder 生成的通用 Rootfs，并放进官方要求的位置
           SOURCE_FILE=$(find output/ -name "openwrt-${{ inputs.openwrt_ver }}-*-rootfs.tar.gz" | head -n 1)
           cp "$SOURCE_FILE" "openwrt-armsr/openwrt-armsr-armv8-generic-rootfs.tar.gz"
           
-          # 按照官方指南，执行打包命令
           sudo chmod +x remake
           sudo ./remake -b s905d -k ${{ inputs.kernel_ver }} -p ${{ inputs.default_ip }}
           
-          # 【核心优化 3】适配官方说明：在根目录及其子目录（含 openwrt/out）全局安全检索生成的固件
           mkdir -p ./artifact/
           RAW_FIRMWARE=$(find . -type f -name "*s905d*.img.gz" | head -n 1)
           
