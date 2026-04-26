@@ -96,7 +96,6 @@ jobs:
           [ "${{ inputs.include_ssr_plus }}" = "true" ] && download_latest_plugin "SSR-Plus-armsr-armv8"
           [ "${{ inputs.include_zerotier }}" = "true" ] && download_latest_plugin "ZeroTier-armsr-armv8"
 
-          # 提取下载好的包名，准备传给 ImageBuilder
           if ls ${{ env.LOCAL_PKGS_DIR }}/*.apk 1> /dev/null 2>&1; then
               CUSTOM_PKGS=$(ls ${{ env.LOCAL_PKGS_DIR }}/*.apk | xargs -n1 basename | cut -d'_' -f1 | tr '\n' ' ')
               echo "CUSTOM_PKGS=$CUSTOM_PKGS" >> $GITHUB_ENV
@@ -126,7 +125,6 @@ jobs:
           FINAL_PKGS="${{ env.PACKAGES }} ${{ env.CUSTOM_PKGS }}"
           sed -i "/make image/ s/PACKAGES=\"[^\"]*\"/PACKAGES=\"$FINAL_PKGS\"/" config/imagebuilder/imagebuilder.sh
           
-          # 【致敬官方文档】直接在 make image 运行前，把 apk 丢进官方要求的 packages 目录里，把索引工作全权交给 ImageBuilder 自己处理！
           if [ -n "${{ env.CUSTOM_PKGS }}" ]; then
               sed -i '/make image/i \    mkdir -p packages && cp -f ${{ env.LOCAL_PKGS_DIR }}/*.apk packages/ 2>/dev/null || true' config/imagebuilder/imagebuilder.sh
           fi
@@ -142,12 +140,26 @@ jobs:
           cd ${{ env.WORK_DIR }}
           mkdir -p openwrt-armsr
           
-          SOURCE_FILE=$(find output/ -name "openwrt-${{ inputs.openwrt_ver }}-*-rootfs.tar.gz" | head -n 1)
-          cp "$SOURCE_FILE" "openwrt-armsr/openwrt-armsr-armv8-generic-rootfs.tar.gz"
+          # 【核心修复】使用全局 find，无视 ImageBuilder 的目录玄学变动
+          echo "🔍 正在全盘搜索生成的 rootfs.tar.gz..."
+          SOURCE_FILE=$(find . -type f -name "*rootfs.tar.gz" | grep -v "openwrt-armsr" | head -n 1)
           
+          # 加入容错打印逻辑
+          if [ -z "$SOURCE_FILE" ]; then
+              echo "❌ 严重错误: 未能找到生成的 rootfs.tar.gz 固件底包！"
+              echo "⬇️ 打印当前所有的 .tar.gz 文件供排错分析："
+              find . -type f -name "*.tar.gz"
+              exit 1
+          fi
+          
+          echo "✅ 成功锁定底包位置: $SOURCE_FILE"
+          cp -v "$SOURCE_FILE" "openwrt-armsr/openwrt-armsr-armv8-generic-rootfs.tar.gz"
+          
+          # 运行 Ophub 核心打包装载程序
           sudo chmod +x remake
           sudo ./remake -b s905d -k ${{ inputs.kernel_ver }} -p ${{ inputs.default_ip }}
           
+          # 全局搜索寻找最终生成的 N1 刷机包
           mkdir -p ./artifact/
           RAW_FIRMWARE=$(find . -type f -name "*s905d*.img.gz" | head -n 1)
           
@@ -157,8 +169,9 @@ jobs:
               
               NEW_NAME="openwrt_official_amlogic_s905d_${REAL_KERNEL}_$(date +%Y.%m.%d).img.gz"
               cp -v "$RAW_FIRMWARE" "./artifact/$NEW_NAME"
+              echo "🎉 最终固件已提取完成: $NEW_NAME"
           else
-            echo "❌ 打包失败: 未能在构建目录找到 img.gz 固件！"
+            echo "❌ 打包失败: remake 运行完毕但未找到 img.gz 固件！"
             exit 1
           fi
 
