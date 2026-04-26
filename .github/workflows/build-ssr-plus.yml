@@ -85,18 +85,26 @@ jobs:
       - name: Generate Defconfig
         working-directory: ./sdk_dir
         run: |
-          # 1. 禁用 Shadowsocks-Rust (避开 Rust 编译错误)
-          echo "# CONFIG_PACKAGE_shadowsocks-rust-ss-local is not set" >> .config
-          echo "# CONFIG_PACKAGE_shadowsocks-rust-ss-redir is not set" >> .config
-          echo "# CONFIG_PACKAGE_shadowsocks-rust-ss-server is not set" >> .config
+         make defconfig
+
+         # 1. 禁用全量编译
+         sed -i 's/CONFIG_ALL=y/# CONFIG_ALL is not set/' .config
+         sed -i 's/CONFIG_ALL_KMODS=y/# CONFIG_ALL_KMODS is not set/' .config
+         sed -i 's/CONFIG_ALL_NONSHARED=y/# CONFIG_ALL_NONSHARED is not set/' .config
           
-          # 3. 语言包设置
-          echo "CONFIG_LUCI_LANG_zh_Hans=y" >> .config
-          echo "CONFIG_PACKAGE_luci-i18n-ssr-plus-zh-cn=y" >> .config
-          echo "CONFIG_PACKAGE_luci-i18n-ssr-plus-zh-Hans=y" >> .config
+         # 2. 开启中文语言支持
+         echo "CONFIG_LUCI_LANG_zh_Hans=y" >> .config
           
-          # 4. 强制选择插件核心
-          echo "CONFIG_PACKAGE_luci-app-ssr-plus=y" >> .config
+          # 3. 精简ssr-plus
+          cat <<EOF >> .config
+          CONFIG_PACKAGE_luci-app-ssr-plus=m
+          CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Shadowsocks_NONE_Client=y
+          CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Shadowsocks_NONE_Server=y
+          # CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Shadowsocks_Rust_Client is not set
+          # CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Shadowsocks_Rust_Server is not set
+          # CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Shadowsocks_Simple_Obfs is not set
+          # CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_ShadowsocksR_Libev_Client is not set
+          EOF
           
           make defconfig
 
