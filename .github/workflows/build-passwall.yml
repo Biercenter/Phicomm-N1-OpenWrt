@@ -1,4 +1,4 @@
-name: Universal Build luci-app-passwall
+name: Build luci-app-passwall
 
 on:
   workflow_dispatch:
