@@ -116,7 +116,7 @@ jobs:
           
           # 寻找并移动 Rootfs
           mkdir -p openwrt-armsr
-          find output/ -name "*rootfs.tar.gz" -exec cp {} openwrt-armsr/openwrt-armsr-armv8-generic-rootfs.tar.gz \;
+          find ./output/ -name "*rootfs.tar.gz" -exec cp {} openwrt-armsr/openwrt-armsr-armv8-generic-rootfs.tar.gz \;
           
           # 打包 N1 镜像
           sudo chmod +x remake
