@@ -1,134 +1,143 @@
-name: Universal Build luci-app-passwall
+name: Build Phicomm N1 OpenWrt
 
 on:
   workflow_dispatch:
     inputs:
-      sdk_url:
-        description: '🎯 OpenWrt SDK 下载链接 (.tar.zst)'
+      openwrt_ver:
+        description: '🎯 OpenWrt SDK 版本'
         required: true
-        type: string
-        default: 'https://downloads.openwrt.org/releases/25.12.2/targets/armsr/armv8/openwrt-sdk-25.12.2-armsr-armv8_gcc-14.3.0_musl.Linux-x86_64.tar.zst'
-      arch_name:
-        description: '🏷️ 架构名称 (用于输出文件命名, 如 armsr-armv8)'
+        default: '25.12.2'
+      kernel_ver:
+        description: '🐧 Amlogic 内核版本'
         required: true
-        type: string
-        default: 'armsr-armv8'
-      source_branch:
-        description: '🌿 Passwall 源码分支'
+        default: '6.18.y'
+      default_ip:
+        description: '🌐 路由器默认后台 IP'
         required: true
-        type: string
-        default: 'main'
-      use_cache:
-        description: '⚡ 启用源码缓存'
+        default: '192.168.100.1'
+      disable_ipv6:
+        description: '🚷 禁用 IPv6'
         required: true
         type: boolean
         default: true
-
-permissions:
-  contents: write
+      include_passwall:
+        description: '📦 集成: luci-app-passwall'
+        type: boolean
+        default: true
+      include_ssr_plus:
+        description: '📦 集成: luci-app-ssr-plus'
+        type: boolean
+        default: true
+      include_zerotier:
+        description: '📦 集成: luci-app-zerotier'
+        type: boolean
+        default: true
 
 env:
-  PASSWALL_PKG_REPO: "https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git"
-  PASSWALL_LUCI_REPO: "https://github.com/Openwrt-Passwall/openwrt-passwall.git"
+  LOCAL_PKGS_DIR: ${{ github.workspace }}/pkgs
+  WORK_DIR: ${{ github.workspace }}/amlogic-s9xxx-openwrt
+  TZ: Asia/Shanghai
 
 jobs:
-  build:
-    name: Build Passwall (${{ inputs.arch_name }})
+  build_firmware:
+    name: 构建 N1 固件
     runs-on: ubuntu-24.04
-
+    permissions:
+      contents: write
+    
     steps:
-      - name: Checkout Repository
+      - name: 1. 环境初始化
         uses: actions/checkout@v4
 
-      - name: Generate Tag Date
-        id: tag_date
-        run: echo "date=$(date +'%Y.%m.%d-%H%M')" >> $GITHUB_OUTPUT
-
-      - name: Install System Dependencies
-        env:
-          DEBIAN_FRONTEND: noninteractive
+      - name: 2. 准备构建工具与依赖
         run: |
+          git clone --depth 1 https://github.com/ophub/amlogic-s9xxx-openwrt.git ${WORK_DIR}
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git libncurses5-dev libssl-dev python3-setuptools rsync swig unzip zlib1g-dev file wget curl zstd
+          sudo apt-get install -y $(cat ${WORK_DIR}/make-openwrt/scripts/ubuntu2404-make-openwrt-depends) gh qemu-user-static binfmt-support
+          sudo update-binfmts --enable
 
-      - name: Cache Downloaded Sources
-        if: ${{ inputs.use_cache }}
-        uses: actions/cache@v4
-        with:
-          path: sdk_dir/dl
-          key: ${{ runner.os }}-openwrt-dl-${{ inputs.arch_name }}-${{ hashFiles('**/*.yml') }}
-          restore-keys: |
-            ${{ runner.os }}-openwrt-dl-${{ inputs.arch_name }}-
-
-      - name: Download and Extract OpenWrt SDK
+      - name: 3. 下载第三方插件
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "Downloading SDK..."
-          wget -q -O sdk.tar.zst "${{ inputs.sdk_url }}"
-          echo "Extracting SDK..."
-          mkdir -p sdk_dir
-          tar -I zstd -xf sdk.tar.zst -C sdk_dir --strip-components=1
+          mkdir -p ${LOCAL_PKGS_DIR}
+          download_plugin() {
+            local TAG=$(gh api repos/${{ github.repository }}/releases --jq '.[].tag_name' | grep "^$1" | head -n 1)
+            [ -n "$TAG" ] && gh release download "$TAG" --repo "${{ github.repository }}" --dir ${LOCAL_PKGS_DIR} --pattern "*.apk"
+          }
+          ${{ inputs.include_passwall }} && download_plugin "Passwall-armsr-armv8"
+          ${{ inputs.include_ssr_plus }} && download_plugin "SSR-Plus-armsr-armv8"
+          ${{ inputs.include_zerotier }} && download_plugin "ZeroTier-armsr-armv8"
 
-      - name: Add Passwall Feeds
-        working-directory: ./sdk_dir
+      - name: 4. 配置 ImageBuilder 注入
         run: |
-          echo "src-git passwall_packages ${{ env.PASSWALL_PKG_REPO }};${{ inputs.source_branch }}" >> feeds.conf.default
-          echo "src-git passwall_luci ${{ env.PASSWALL_LUCI_REPO }};${{ inputs.source_branch }}" >> feeds.conf.default
-
-      - name: Update and Install Feeds
-        working-directory: ./sdk_dir
-        run: |
-          ./scripts/feeds update -a
-          ./scripts/feeds install -a
-
-      - name: Fix Kconfig & Dependency Issues
-        working-directory: ./sdk_dir
-        run: |
-          # 修复 libcurl 递归依赖冲突 (关键修复)
-          if [ -f feeds/packages/net/curl/Config.in ]; then
-            echo "Applying fix for libcurl recursive dependency..."
-            sed -i 's/depends on PACKAGE_libcurl//g' feeds/packages/net/curl/Config.in
+          # 准备配置目录
+          IB_FILES="${WORK_DIR}/config/imagebuilder/files"
+          mkdir -p ${IB_FILES}/etc/uci-defaults
+          
+          # 写入首启脚本
+          cat <<EOF > ${IB_FILES}/etc/uci-defaults/99-custom-settings
+          #!/bin/sh
+          # 卸载多余插件
+          for pkg in luci-app-ddns luci-app-dockerman luci-app-frpc luci-app-frps luci-app-upnp luci-app-wol luci-app-ttyd; do
+              apk del -r "\$pkg" 2>/dev/null || true
+          done
+          # IPv6 设置
+          if [ "${{ inputs.disable_ipv6 }}" = "true" ]; then
+              uci set dhcp.lan.ra='disabled'; uci set dhcp.lan.ndp='disabled'; uci set dhcp.lan.dhcpv6='disabled'
+              uci delete network.lan.ip6assign
+              uci commit
           fi
-          
-          # 修复部分 SDK 缺失 Rust 环境导致编译失败的问题
-          # 如果插件需要 rust，尝试强制禁用不需要的 Rust 依赖组件以绕过 host 编译
-          # 或者在此处可以添加预装 rust 的指令
+          # 注入自定义配置
+          ${{ vars.CUSTOM_UCI }}
+          ${{ secrets.SECRET_UCI }}
+          exit 0
+          EOF
+          chmod +x ${IB_FILES}/etc/uci-defaults/99-custom-settings
 
-      - name: Generate Defconfig
-        working-directory: ./sdk_dir
+          # 解析 APK 包名并修改 ImageBuilder 脚本
+          cd ${WORK_DIR}
+          CUSTOM_PKGS=""
+          if [ -d "${LOCAL_PKGS_DIR}" ] && ls ${LOCAL_PKGS_DIR}/*.apk >/dev/null 2>&1; then
+              mkdir -p packages && cp ${LOCAL_PKGS_DIR}/*.apk packages/
+              for f in packages/*.apk; do
+                  NAME=$(tar -xOf "$f" .PKGINFO 2>/dev/null | awk -F ' = ' '/pkgname/ {print $2}')
+                  [ -n "$NAME" ] && CUSTOM_PKGS="\$CUSTOM_PKGS $NAME"
+              done
+          fi
+          sed -i "/make image/ s/PACKAGES=\"/& $CUSTOM_PKGS /" config/imagebuilder/imagebuilder.sh
+          sed -i '/make image/i \mkdir -p packages && cp -f ${{ env.LOCAL_PKGS_DIR }}/*.apk packages/ 2>/dev/null || true' config/imagebuilder/imagebuilder.sh
+
+      - name: 5. 执行构建与打包
         run: |
-          # 选中核心插件
-          echo "CONFIG_PACKAGE_luci-app-passwall=y" >> .config
+          cd ${WORK_DIR}
+          # 生成 Rootfs
+          sudo ./config/imagebuilder/imagebuilder.sh "openwrt:${{ inputs.openwrt_ver }}"
           
-          # 强制选中语言包
-          echo "CONFIG_LUCI_LANG_zh_Hans=y" >> .config
-          echo "CONFIG_PACKAGE_luci-i18n-passwall-zh-cn=y" >> .config
+          # 寻找并移动 Rootfs
+          mkdir -p openwrt-armsr
+          find ./output/ -name "*rootfs.tar.gz" -exec cp {} openwrt-armsr/openwrt-armsr-armv8-generic-rootfs.tar.gz \;
           
-          # 自动处理依赖并生成最终配置
-          make defconfig
+          # 打包 N1 镜像
+          sudo chmod +x remake
+          sudo ./remake -b s905d -k ${{ inputs.kernel_ver }} -p ${{ inputs.default_ip }}
+          
+          # 整理归档
+          mkdir -p artifact
+          IMG=$(find output -name "*s905d*.img.gz" | head -n 1)
+          NEW_NAME="openwrt_N1_${{ inputs.openwrt_ver }}_k${{ inputs.kernel_ver }}_$(date +%Y%m%d).img.gz"
+          cp "$IMG" "artifact/$NEW_NAME"
 
-      - name: Compile luci-app-passwall
-        working-directory: ./sdk_dir
-        run: |
-          # 优先尝试多线程编译，失败则回退到单线程详细输出
-          make package/luci-app-passwall/compile -j$(nproc) || make package/luci-app-passwall/compile -j1 V=s
-
-      - name: Collect Custom APK Files
-        run: |
-          mkdir -p output_apk
-          # 兼容 APK (新版 OpenWrt) 和 IPK (旧版)
-          find sdk_dir/bin/ -type f \( -name "*.apk" -o -name "*.ipk" \) \
-            \( -path "*/passwall_luci/*" -o -path "*/passwall_packages/*" \) \
-            -exec cp {} output_apk/ \;
-
-      - name: Upload to GitHub Release
+      - name: 6. 发布 Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: Passwall-${{ inputs.arch_name }}-${{ steps.tag_date.outputs.date }}
-          name: 🚀 Passwall (${{ inputs.arch_name }}) - ${{ steps.tag_date.outputs.date }}
-          files: output_apk/*
+          tag_name: N1-${{ inputs.openwrt_ver }}-${{ github.run_id }}
+          files: ${{ env.WORK_DIR }}/artifact/*.img.gz
           body: |
-            ### 自动化编译结果
-            - **编译目标架构**: `${{ inputs.arch_name }}`
-            - **使用的 SDK**: `${{ inputs.sdk_url }}`
-            - **源码分支**: `${{ inputs.source_branch }}`
-            - *修复了 libcurl 递归依赖问题。*
+            ### 🚀 N1 固件构建完成
+            - **OpenWrt:** ${{ inputs.openwrt_ver }}
+            - **Kernel:** ${{ inputs.kernel_ver }}
+            - **IP:** ${{ inputs.default_ip }}
+            - **默认密码:** password
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
