@@ -42,7 +42,6 @@ on:
         default: true
 
 env:
-  # 基础预装包列表 (移除不需要的服务，增加所需工具)
   PACKAGES: "-luci-app-ddns -luci-app-dockerman -luci-app-frpc -luci-app-frps -luci-app-upnp -luci-app-wol luci-app-ttyd luci-i18n-ttyd-zh-cn"
   LOCAL_PKGS_DIR: "${{ github.workspace }}/pkgs"
   TZ: Asia/Shanghai
@@ -60,23 +59,31 @@ jobs:
       - name: 1. 检出当前仓库代码
         uses: actions/checkout@v4
 
-      - name: 2. 初始化编译环境 (Ubuntu 24.04)
+      # 【核心优化 1】先克隆官方打包仓库，以便后续读取官方依赖表
+      - name: 2. 克隆 Ophub 打包工具仓库
+        run: |
+          git clone --depth 1 https://github.com/ophub/amlogic-s9xxx-openwrt.git
+          echo "WORK_DIR=$(pwd)/amlogic-s9xxx-openwrt" >> $GITHUB_ENV
+
+      # 【核心优化 2】严格按照官方文档读取 24.04 专属依赖并安装
+      - name: 3. 安装官方指定的构建环境依赖
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
-          sudo apt-get update
-          # 精简安装必备工具链，直接引入原生 apk-tools 替代 Docker
-          sudo apt-get install -y --no-install-recommends git wget curl tar gzip xz-utils btrfs-progs unzip dosfstools \
-                                  parted bc build-essential jq pigz qemu-user-static binfmt-support gh apk-tools
+          sudo apt-get update -y
+          # 读取刚才克隆下来的 amlogic 仓库中的官方依赖列表
+          sudo apt-get install -y $(cat ${{ env.WORK_DIR }}/make-openwrt/scripts/ubuntu2404-make-openwrt-depends)
+          # 额外安装供我们拉取 Release 的 GitHub CLI (gh)
+          sudo apt-get install -y gh
+          # 启用 binfmt 支持（QEMU 交叉编译需要）
           sudo update-binfmts --enable
 
-      - name: 3. 动态拉取第三方插件 (基于本仓库 Release)
+      - name: 4. 动态拉取第三方插件 & 生成本地源
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p ${{ env.LOCAL_PKGS_DIR }}
           
-          # 通用拉取函数：匹配最新 Tag 并下载所有 .apk 文件
           download_latest_plugin() {
             local PREFIX=$1
             echo "🔎 正在检索最新版本: [$PREFIX]..."
@@ -90,22 +97,26 @@ jobs:
             fi
           }
 
-          # 根据网页面板的复选框状态执行下载
           [ "${{ inputs.include_passwall }}" = "true" ] && download_latest_plugin "Passwall-armsr-armv8"
           [ "${{ inputs.include_ssr_plus }}" = "true" ] && download_latest_plugin "SSR-Plus-armsr-armv8"
           [ "${{ inputs.include_zerotier }}" = "true" ] && download_latest_plugin "ZeroTier-armsr-armv8"
 
-      - name: 4. 准备打包环境 (Amlogic 脚本)
-        run: |
-          git clone --depth 1 https://github.com/ophub/amlogic-s9xxx-openwrt.git
-          echo "WORK_DIR=$(pwd)/amlogic-s9xxx-openwrt" >> $GITHUB_ENV
+          # 检查是否下载了包，生成索引
+          if ls ${{ env.LOCAL_PKGS_DIR }}/*.apk 1> /dev/null 2>&1; then
+              CUSTOM_PKGS=$(ls ${{ env.LOCAL_PKGS_DIR }}/*.apk | xargs -n1 basename | cut -d'_' -f1 | tr '\n' ' ')
+              echo "CUSTOM_PKGS=$CUSTOM_PKGS" >> $GITHUB_ENV
+              
+              # 【稳定方案】使用 Docker Alpine 独立生成索引，无视 Ubuntu 本身的依赖问题
+              echo "📦 正在使用 Alpine 容器生成本地 apk 源索引..."
+              docker run --rm -v ${{ env.LOCAL_PKGS_DIR }}:/my_pkgs alpine:latest sh -c "apk add --no-cache apk-tools && cd /my_pkgs && apk index --allow-untrusted -o APKINDEX.tar.gz *.apk"
+              echo "LOCAL_REPO_URL=file://${{ env.LOCAL_PKGS_DIR }}" >> $GITHUB_ENV
+          fi
 
-      - name: 5. 写入预设配置 & 生成本地源索引
+      - name: 5. 写入预设配置 & 生成 Rootfs
         run: |
           cd ${{ env.WORK_DIR }}
           mkdir -p config/imagebuilder/files/etc/uci-defaults
           
-          # 注入开机自启脚本 (处理 IPv6 与 自定义指令)
           cat <<EOF > config/imagebuilder/files/etc/uci-defaults/99-custom-settings
           #!/bin/sh
           if [ "${{ inputs.disable_ipv6 }}" = "true" ]; then
@@ -122,27 +133,9 @@ jobs:
           EOF
           chmod +x config/imagebuilder/files/etc/uci-defaults/99-custom-settings
 
-          # 检查是否真的下载了插件包，如果有则生成本地源索引
-          if ls ${{ env.LOCAL_PKGS_DIR }}/*.apk 1> /dev/null 2>&1; then
-              # 提取所有包名作为 ImageBuilder 的参数
-              CUSTOM_PKGS=$(ls ${{ env.LOCAL_PKGS_DIR }}/*.apk | xargs -n1 basename | cut -d'_' -f1 | tr '\n' ' ')
-              echo "CUSTOM_PKGS=$CUSTOM_PKGS" >> $GITHUB_ENV
-              
-              echo "📦 正在生成本地 apk 源索引..."
-              cd ${{ env.LOCAL_PKGS_DIR }}
-              apk index --allow-untrusted -o APKINDEX.tar.gz *.apk
-              echo "LOCAL_REPO_URL=file://$(readlink -f .)" >> $GITHUB_ENV
-          fi
-
-      - name: 6. 运行 ImageBuilder 生成 Rootfs
-        run: |
-          cd ${{ env.WORK_DIR }}
-          
-          # 拼接官方基础包和我们自定义的插件包
           FINAL_PKGS="${{ env.PACKAGES }} ${{ env.CUSTOM_PKGS }}"
           sed -i "/make image/ s/PACKAGES=\"[^\"]*\"/PACKAGES=\"$FINAL_PKGS\"/" config/imagebuilder/imagebuilder.sh
           
-          # 【异步注入源】等待 openwrt 目录生成后，立即将本地源路径写入配置文件
           if [ -n "${{ env.LOCAL_REPO_URL }}" ]; then
             (
               for i in {1..150}; do
@@ -161,22 +154,24 @@ jobs:
           sudo chmod +x config/imagebuilder/imagebuilder.sh
           sudo ./config/imagebuilder/imagebuilder.sh "openwrt:${{ inputs.openwrt_ver }}"
 
-      - name: 7. N1 固件适配打包与提取
+      - name: 6. N1 本地化适配打包与提取
         run: |
           cd ${{ env.WORK_DIR }}
+          
+          # 按照官方指南要求，创建 openwrt-armsr 文件夹
           mkdir -p openwrt-armsr
           
-          # 定位刚才生成的通用 Rootfs 并重命名
+          # 定位刚才 ImageBuilder 生成的通用 Rootfs，并放进官方要求的位置
           SOURCE_FILE=$(find output/ -name "openwrt-${{ inputs.openwrt_ver }}-*-rootfs.tar.gz" | head -n 1)
           cp "$SOURCE_FILE" "openwrt-armsr/openwrt-armsr-armv8-generic-rootfs.tar.gz"
           
-          # 调用 Ophub 脚本执行 s905d 打包
+          # 按照官方指南，执行打包命令
           sudo chmod +x remake
           sudo ./remake -b s905d -k ${{ inputs.kernel_ver }} -p ${{ inputs.default_ip }}
           
-          # 严格筛选生成的固件文件 (避免混入杂乱的哈希文件)
+          # 【核心优化 3】适配官方说明：在根目录及其子目录（含 openwrt/out）全局安全检索生成的固件
           mkdir -p ./artifact/
-          RAW_FIRMWARE=$(find out/ -type f -name "*s905d*.img.gz" | head -n 1)
+          RAW_FIRMWARE=$(find . -type f -name "*s905d*.img.gz" | head -n 1)
           
           if [ -n "$RAW_FIRMWARE" ]; then
               REAL_KERNEL=$(echo $RAW_FIRMWARE | grep -oE "k[0-9]+\.[0-9]+\.[0-9]+")
@@ -189,7 +184,7 @@ jobs:
             exit 1
           fi
 
-      - name: 8. 生成发布报告
+      - name: 7. 生成发布报告
         run: |
           cat <<EOF > release_notes.md
           ### 🚀 N1 专属固件构建成功！
@@ -212,7 +207,7 @@ jobs:
           \`\`\`
           EOF
 
-      - name: 9. 上传至 GitHub Release
+      - name: 8. 上传至 GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: N1-${{ inputs.openwrt_ver }}-${{ github.run_id }}
