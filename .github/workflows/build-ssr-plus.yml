@@ -65,6 +65,7 @@ jobs:
           wget -q -O sdk.tar.zst "${{ inputs.sdk_url }}"
           
           echo "Extracting SDK..."
+          rm -rf sdk_dir
           mkdir -p sdk_dir
           # 【完美修复】直接铺平解压，无惧缓存目录干扰
           tar -I zstd -xf sdk.tar.zst -C sdk_dir --strip-components=1
