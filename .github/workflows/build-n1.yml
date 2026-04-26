@@ -108,7 +108,7 @@ jobs:
           sed -i "/make image/ s/PACKAGES=\"/& $CUSTOM_PKGS /" config/imagebuilder/imagebuilder.sh
           sed -i '/make image/i \mkdir -p packages && cp -f ${{ env.LOCAL_PKGS_DIR }}/*.apk packages/ 2>/dev/null || true' config/imagebuilder/imagebuilder.sh
 
-- name: 5. 执行构建与打包
+        - name: 5. 执行构建与打包
         run: |
           cd ${WORK_DIR}
           # 第一步：生成 Rootfs
