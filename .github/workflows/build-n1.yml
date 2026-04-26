@@ -42,7 +42,6 @@ on:
         default: true
 
 env:
-  # 基础预装包列表 (精简掉不需要的服务，保留必备项)
   PACKAGES: "-luci-app-ddns -luci-app-dockerman -luci-app-frpc -luci-app-frps -luci-app-upnp -luci-app-wol luci-app-ttyd luci-i18n-ttyd-zh-cn"
   LOCAL_PKGS_DIR: "${{ github.workspace }}/pkgs"
   TZ: Asia/Shanghai
@@ -70,20 +69,16 @@ jobs:
           DEBIAN_FRONTEND: noninteractive
         run: |
           sudo apt-get update -y
-          # 严格读取官方要求的 Ubuntu 24.04 依赖表
           sudo apt-get install -y $(cat ${{ env.WORK_DIR }}/make-openwrt/scripts/ubuntu2404-make-openwrt-depends)
-          # 手动补齐跨架构核心组件与 GitHub CLI
           sudo apt-get install -y gh qemu-user-static binfmt-support
-          # 启用 QEMU 跨架构编译支持
           sudo update-binfmts --enable
 
-      - name: 4. 动态拉取第三方插件 & 生成本地源
+      - name: 4. 动态拉取第三方插件
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p ${{ env.LOCAL_PKGS_DIR }}
           
-          # 通用函数：调用 GitHub API 获取最新 Release 并下载
           download_latest_plugin() {
             local PREFIX=$1
             echo "🔎 正在检索最新版本: [$PREFIX]..."
@@ -97,29 +92,21 @@ jobs:
             fi
           }
 
-          # 根据网页选项决定是否下载
           [ "${{ inputs.include_passwall }}" = "true" ] && download_latest_plugin "Passwall-armsr-armv8"
           [ "${{ inputs.include_ssr_plus }}" = "true" ] && download_latest_plugin "SSR-Plus-armsr-armv8"
           [ "${{ inputs.include_zerotier }}" = "true" ] && download_latest_plugin "ZeroTier-armsr-armv8"
 
-          # 如果成功下载了插件，则动用 Wolfi 容器生成索引
+          # 提取下载好的包名，准备传给 ImageBuilder
           if ls ${{ env.LOCAL_PKGS_DIR }}/*.apk 1> /dev/null 2>&1; then
-              # 提取所有包名，用于后续 ImageBuilder 注入
               CUSTOM_PKGS=$(ls ${{ env.LOCAL_PKGS_DIR }}/*.apk | xargs -n1 basename | cut -d'_' -f1 | tr '\n' ' ')
               echo "CUSTOM_PKGS=$CUSTOM_PKGS" >> $GITHUB_ENV
-              
-              # 【核心解法】调用原生支持 apk v3 格式的 Wolfi OS 容器
-              echo "📦 正在借助 Wolfi 容器生成最新版 apk 索引..."
-              docker run --rm -v ${{ env.LOCAL_PKGS_DIR }}:/my_pkgs cgr.dev/chainguard/wolfi-base sh -c "cd /my_pkgs && apk index --allow-untrusted -o APKINDEX.tar.gz *.apk"
-              echo "LOCAL_REPO_URL=file://${{ env.LOCAL_PKGS_DIR }}" >> $GITHUB_ENV
           fi
 
-      - name: 5. 写入预设配置 & 生成 Rootfs
+      - name: 5. 写入预设配置 & 注入自定义包
         run: |
           cd ${{ env.WORK_DIR }}
           mkdir -p config/imagebuilder/files/etc/uci-defaults
           
-          # 注入开机自启脚本
           cat <<EOF > config/imagebuilder/files/etc/uci-defaults/99-custom-settings
           #!/bin/sh
           if [ "${{ inputs.disable_ipv6 }}" = "true" ]; then
@@ -136,48 +123,35 @@ jobs:
           EOF
           chmod +x config/imagebuilder/files/etc/uci-defaults/99-custom-settings
 
-          # 将自定义包名追加到官方脚本的打包参数中
           FINAL_PKGS="${{ env.PACKAGES }} ${{ env.CUSTOM_PKGS }}"
           sed -i "/make image/ s/PACKAGES=\"[^\"]*\"/PACKAGES=\"$FINAL_PKGS\"/" config/imagebuilder/imagebuilder.sh
           
-          # 【异步注入机制】Ophub 脚本会重置 openwrt 目录，需开启后台监听并精准注入本地源
-          if [ -n "${{ env.LOCAL_REPO_URL }}" ]; then
-            (
-              for i in {1..120}; do
-                if [ -f "openwrt/repositories.conf" ]; then
-                  echo "🎯 侦测到打包环境初始化完毕，开始注入本地源..."
-                  echo "${{ env.LOCAL_REPO_URL }}" | sudo tee -a openwrt/repositories.conf
-                  sudo mkdir -p openwrt/packages
-                  sudo cp -r ${{ env.LOCAL_PKGS_DIR }}/*.apk openwrt/packages/ 2>/dev/null || true
-                  break
-                fi
-                sleep 2
-              done
-            ) &
+          # 【致敬官方文档】直接在 make image 运行前，把 apk 丢进官方要求的 packages 目录里，把索引工作全权交给 ImageBuilder 自己处理！
+          if [ -n "${{ env.CUSTOM_PKGS }}" ]; then
+              sed -i '/make image/i \    mkdir -p packages && cp -f ${{ env.LOCAL_PKGS_DIR }}/*.apk packages/ 2>/dev/null || true' config/imagebuilder/imagebuilder.sh
           fi
-          
+
+      - name: 6. 运行 ImageBuilder 生成 Rootfs
+        run: |
+          cd ${{ env.WORK_DIR }}
           sudo chmod +x config/imagebuilder/imagebuilder.sh
           sudo ./config/imagebuilder/imagebuilder.sh "openwrt:${{ inputs.openwrt_ver }}"
 
-      - name: 6. N1 架构重构与固件提取
+      - name: 7. N1 架构重构与固件提取
         run: |
           cd ${{ env.WORK_DIR }}
           mkdir -p openwrt-armsr
           
-          # 提取 ImageBuilder 刚刚生成的通用版 rootfs
           SOURCE_FILE=$(find output/ -name "openwrt-${{ inputs.openwrt_ver }}-*-rootfs.tar.gz" | head -n 1)
           cp "$SOURCE_FILE" "openwrt-armsr/openwrt-armsr-armv8-generic-rootfs.tar.gz"
           
-          # 运行 Ophub 核心打包装载程序，适配 N1 (s905d) 芯片
           sudo chmod +x remake
           sudo ./remake -b s905d -k ${{ inputs.kernel_ver }} -p ${{ inputs.default_ip }}
           
-          # 寻找并重命名最终固件文件
           mkdir -p ./artifact/
           RAW_FIRMWARE=$(find . -type f -name "*s905d*.img.gz" | head -n 1)
           
           if [ -n "$RAW_FIRMWARE" ]; then
-              # 智能提取实际使用的内核版本
               REAL_KERNEL=$(echo $RAW_FIRMWARE | grep -oE "k[0-9]+\.[0-9]+\.[0-9]+")
               [ -z "$REAL_KERNEL" ] && REAL_KERNEL="k${{ inputs.kernel_ver }}"
               
@@ -188,7 +162,7 @@ jobs:
             exit 1
           fi
 
-      - name: 7. 生成 Markdown 发布报告
+      - name: 8. 生成 Markdown 发布报告
         run: |
           cat <<EOF > release_notes.md
           ### 🚀 N1 专属固件构建成功！
@@ -211,7 +185,7 @@ jobs:
           \`\`\`
           EOF
 
-      - name: 8. 上传至 GitHub Releases
+      - name: 9. 上传至 GitHub Releases
         uses: softprops/action-gh-release@v2
         with:
           tag_name: N1-${{ inputs.openwrt_ver }}-${{ github.run_id }}
