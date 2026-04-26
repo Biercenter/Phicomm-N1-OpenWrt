@@ -61,13 +61,30 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p ${LOCAL_PKGS_DIR}
+          
+          # 定义下载函数：增加模糊匹配和日志输出
           download_plugin() {
-            local TAG=$(gh api repos/${{ github.repository }}/releases --jq '.[].tag_name' | grep "^$1" | head -n 1)
-            [ -n "$TAG" ] && gh release download "$TAG" --repo "${{ github.repository }}" --dir ${LOCAL_PKGS_DIR} --pattern "*.apk"
+            echo "🔍 正在检索关键字为 [$1] 的 Release..."
+            # 获取所有 tag 并通过 grep 匹配关键字
+            local TAG=$(gh api repos/${{ github.repository }}/releases --jq '.[].tag_name' | grep -i "$1" | head -n 1)
+            
+            if [ -z "$TAG" ]; then
+              echo "❌ 错误: 未能在仓库中找到包含 [$1] 的 Release 标签。"
+              return 0
+            fi
+            
+            echo "✅ 找到标签 [$TAG]，开始下载 APK 文件..."
+            gh release download "$TAG" --repo "${{ github.repository }}" --dir ${LOCAL_PKGS_DIR} --pattern "*.apk"
           }
-          ${{ inputs.include_passwall }} && download_plugin "Passwall-armsr-armv8"
-          ${{ inputs.include_ssr_plus }} && download_plugin "SSR-Plus-armsr-armv8"
-          ${{ inputs.include_zerotier }} && download_plugin "ZeroTier-armsr-armv8"
+
+          # 根据输入决定是否下载
+          [ "${{ inputs.include_passwall }}" = "true" ] && download_plugin "Passwall"
+          [ "${{ inputs.include_ssr_plus }}" = "true" ] && download_plugin "SSR-Plus"
+          [ "${{ inputs.include_zerotier }}" = "true" ] && download_plugin "ZeroTier"
+
+          echo "---------------------------------------"
+          echo "📂 最终待集成插件列表:"
+          ls ${LOCAL_PKGS_DIR} || echo "空目录"
 
       - name: 4. 配置 ImageBuilder 注入
         run: |
@@ -75,22 +92,15 @@ jobs:
           IB_FILES="${WORK_DIR}/config/imagebuilder/files"
           mkdir -p ${IB_FILES}/etc/uci-defaults
           
-          # 写入首启脚本
+          # 写入首启配置脚本 (设置 IP 和 IPv6)
           cat <<EOF > ${IB_FILES}/etc/uci-defaults/99-custom-settings
           #!/bin/sh
-          # 卸载多余插件
-          for pkg in luci-app-ddns luci-app-dockerman luci-app-frpc luci-app-frps luci-app-upnp luci-app-wol luci-app-ttyd; do
-              apk del -r "\$pkg" 2>/dev/null || true
-          done
           # IPv6 设置
           if [ "${{ inputs.disable_ipv6 }}" = "true" ]; then
               uci set dhcp.lan.ra='disabled'; uci set dhcp.lan.ndp='disabled'; uci set dhcp.lan.dhcpv6='disabled'
               uci delete network.lan.ip6assign
               uci commit
           fi
-          # 注入自定义配置
-          ${{ vars.CUSTOM_UCI }}
-          ${{ secrets.SECRET_UCI }}
           exit 0
           EOF
           chmod +x ${IB_FILES}/etc/uci-defaults/99-custom-settings
@@ -99,41 +109,53 @@ jobs:
           cd ${WORK_DIR}
           CUSTOM_PKGS=""
           if [ -d "${LOCAL_PKGS_DIR}" ] && ls ${LOCAL_PKGS_DIR}/*.apk >/dev/null 2>&1; then
-              mkdir -p packages && cp ${LOCAL_PKGS_DIR}/*.apk packages/
+              # 拷贝到 ImageBuilder 默认识别的包目录
+              mkdir -p packages
+              cp -f ${LOCAL_PKGS_DIR}/*.apk packages/
+              
+              # 提取每个 APK 的真实包名（用于注入 PACKAGES 变量）
               for f in packages/*.apk; do
+                  # 通过提取 .PKGINFO 获取真正的包名
                   NAME=$(tar -xOf "$f" .PKGINFO 2>/dev/null | awk -F ' = ' '/pkgname/ {print $2}')
-                  [ -n "$NAME" ] && CUSTOM_PKGS="\$CUSTOM_PKGS $NAME"
+                  if [ -n "$NAME" ]; then
+                      CUSTOM_PKGS="$CUSTOM_PKGS $NAME"
+                      echo "➕ 发现插件包: $NAME"
+                  fi
               done
           fi
+
+          # 修改 ophub 的 imagebuilder.sh 脚本，强制注入包名到 PACKAGES 变量中
+          # 同时确保在编译时会拷贝本地 packages 目录
           sed -i "/make image/ s/PACKAGES=\"/& $CUSTOM_PKGS /" config/imagebuilder/imagebuilder.sh
           sed -i '/make image/i \mkdir -p packages && cp -f ${{ env.LOCAL_PKGS_DIR }}/*.apk packages/ 2>/dev/null || true' config/imagebuilder/imagebuilder.sh
 
       - name: 5. 执行构建与打包
         run: |
           cd ${WORK_DIR}
-          # 第一步：生成 Rootfs
+          # 1. 生成 Rootfs (基于 OpenWrt SDK)
           sudo ./config/imagebuilder/imagebuilder.sh "openwrt:${{ inputs.openwrt_ver }}"
           
-          # 第二步：寻找并移动 Rootfs
+          # 2. 准备打包环境
           mkdir -p openwrt-armsr
           find ./output/ -name "*rootfs.tar.gz" -exec cp {} openwrt-armsr/openwrt-armsr-armv8-generic-rootfs.tar.gz \;
           
-          # 第三步：打包 N1 镜像
+          # 3. 打包为 N1 适用的 .img 镜像
           sudo chmod +x remake
           sudo ./remake -b s905d -k ${{ inputs.kernel_ver }} -p ${{ inputs.default_ip }}
           
-          # 第四步：整理归档
+          # 4. 归档结果
           mkdir -p artifact
-          IMG=$(find ./openwrt/out/ -name "*s905d*.img.gz" | head -n 1)
-          
-          if [ -z "$IMG" ]; then
-              echo "❌ 找不到编译好的固件文件！"
-              ls -al ./out/ || true
-              exit 1
+          # 搜索生成的 s905d 固件
+          IMG_PATH=$(find ./out/ -name "*s905d*.img.gz" | head -n 1)
+          if [ -n "$IMG_PATH" ]; then
+              IMG_NAME=$(basename "$IMG_PATH")
+              sudo mv "$IMG_PATH" "artifact/$IMG_NAME"
+              sudo chown $USER:$USER "artifact/$IMG_NAME"
+              echo "✅ 固件已移动到 artifact 目录: $IMG_NAME"
+          else
+            echo "❌ 未找到编译好的 s905d 镜像文件！"
+            exit 1
           fi
-          
-          # NEW_NAME="openwrt_N1_${{ inputs.openwrt_ver }}_k${{ inputs.kernel_ver }}_$(date +%Y%m%d).img.gz"
-          sudo mv "$IMG" "artifact/$IMG"
 
       - name: 6. 发布 Release
         uses: softprops/action-gh-release@v2
@@ -142,9 +164,9 @@ jobs:
           files: ${{ env.WORK_DIR }}/artifact/*.img.gz
           body: |
             ### 🚀 N1 固件构建完成
-            - **OpenWrt:** ${{ inputs.openwrt_ver }}
-            - **Kernel:** ${{ inputs.kernel_ver }}
-            - **IP:** ${{ inputs.default_ip }}
+            - **OpenWrt 版本:** ${{ inputs.openwrt_ver }}
+            - **内核版本:** ${{ inputs.kernel_ver }}
+            - **后台地址:** ${{ inputs.default_ip }}
             - **默认密码:** password
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
