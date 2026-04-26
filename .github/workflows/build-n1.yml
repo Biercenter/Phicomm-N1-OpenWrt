@@ -69,11 +69,13 @@ jobs:
           DEBIAN_FRONTEND: noninteractive
         run: |
           sudo apt-get update -y
+          # 严格读取官方 Ubuntu 24.04 依赖表
           sudo apt-get install -y $(cat ${{ env.WORK_DIR }}/make-openwrt/scripts/ubuntu2404-make-openwrt-depends)
+          # 补齐跨架构核心组件与 GitHub CLI
           sudo apt-get install -y gh qemu-user-static binfmt-support
           sudo update-binfmts --enable
 
-      - name: 4. 动态拉取第三方插件
+      - name: 4. 动态下载已勾选的插件 (不再需要 Docker 生成索引)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -96,12 +98,13 @@ jobs:
           [ "${{ inputs.include_ssr_plus }}" = "true" ] && download_latest_plugin "SSR-Plus-armsr-armv8"
           [ "${{ inputs.include_zerotier }}" = "true" ] && download_latest_plugin "ZeroTier-armsr-armv8"
 
+          # 提取包名准备注入
           if ls ${{ env.LOCAL_PKGS_DIR }}/*.apk 1> /dev/null 2>&1; then
               CUSTOM_PKGS=$(ls ${{ env.LOCAL_PKGS_DIR }}/*.apk | xargs -n1 basename | cut -d'_' -f1 | tr '\n' ' ')
               echo "CUSTOM_PKGS=$CUSTOM_PKGS" >> $GITHUB_ENV
           fi
 
-      - name: 5. 写入预设配置 & 注入自定义包
+      - name: 5. 注入自定义配置与本地 Packages
         run: |
           cd ${{ env.WORK_DIR }}
           mkdir -p config/imagebuilder/files/etc/uci-defaults
@@ -116,7 +119,6 @@ jobs:
               uci commit dhcp
               uci commit network
           fi
-          
           ${{ inputs.custom_uci }}
           exit 0
           EOF
@@ -125,80 +127,71 @@ jobs:
           FINAL_PKGS="${{ env.PACKAGES }} ${{ env.CUSTOM_PKGS }}"
           sed -i "/make image/ s/PACKAGES=\"[^\"]*\"/PACKAGES=\"$FINAL_PKGS\"/" config/imagebuilder/imagebuilder.sh
           
+          # 【核心优化】遵循官方规范：在打包前将插件拷贝至 packages 目录，让 ImageBuilder 内部工具处理
           if [ -n "${{ env.CUSTOM_PKGS }}" ]; then
               sed -i '/make image/i \    mkdir -p packages && cp -f ${{ env.LOCAL_PKGS_DIR }}/*.apk packages/ 2>/dev/null || true' config/imagebuilder/imagebuilder.sh
           fi
 
-      - name: 6. 运行 ImageBuilder 生成 Rootfs
+      - name: 6. 运行 ImageBuilder
         run: |
           cd ${{ env.WORK_DIR }}
           sudo chmod +x config/imagebuilder/imagebuilder.sh
           sudo ./config/imagebuilder/imagebuilder.sh "openwrt:${{ inputs.openwrt_ver }}"
 
-      - name: 7. N1 架构重构与固件提取
+      - name: 7. 定向提取 Rootfs 并开始 N1 打包
         run: |
           cd ${{ env.WORK_DIR }}
           mkdir -p openwrt-armsr
           
-          # 【核心修复】使用全局 find，无视 ImageBuilder 的目录玄学变动
-          echo "🔍 正在全盘搜索生成的 rootfs.tar.gz..."
-          SOURCE_FILE=$(find . -type f -name "*rootfs.tar.gz" | grep -v "openwrt-armsr" | head -n 1)
+          # 【核心修复】根据你的提示，直接从 output 文件夹提取生成的 rootfs
+          echo "🔍 正在从 output 目录提取底包..."
+          SOURCE_FILE=$(ls output/*rootfs.tar.gz 2>/dev/null | head -n 1)
           
-          # 加入容错打印逻辑
           if [ -z "$SOURCE_FILE" ]; then
-              echo "❌ 严重错误: 未能找到生成的 rootfs.tar.gz 固件底包！"
-              echo "⬇️ 打印当前所有的 .tar.gz 文件供排错分析："
-              find . -type f -name "*.tar.gz"
+              echo "⚠️ output 文件夹未找到，尝试在全盘搜索..."
+              SOURCE_FILE=$(find . -type f -name "*rootfs.tar.gz" | grep -v "openwrt-armsr" | head -n 1)
+          fi
+          
+          if [ -n "$SOURCE_FILE" ]; then
+              echo "✅ 锁定底包路径: $SOURCE_FILE"
+              cp -v "$SOURCE_FILE" "openwrt-armsr/openwrt-armsr-armv8-generic-rootfs.tar.gz"
+          else
+              echo "❌ 严重错误: 无法找到 ImageBuilder 生成的底包！"
+              ls -R
               exit 1
           fi
           
-          echo "✅ 成功锁定底包位置: $SOURCE_FILE"
-          cp -v "$SOURCE_FILE" "openwrt-armsr/openwrt-armsr-armv8-generic-rootfs.tar.gz"
-          
-          # 运行 Ophub 核心打包装载程序
+          # 启动 N1 固件生成
           sudo chmod +x remake
           sudo ./remake -b s905d -k ${{ inputs.kernel_ver }} -p ${{ inputs.default_ip }}
           
-          # 全局搜索寻找最终生成的 N1 刷机包
+          # 提取最终刷机包
           mkdir -p ./artifact/
           RAW_FIRMWARE=$(find . -type f -name "*s905d*.img.gz" | head -n 1)
           
           if [ -n "$RAW_FIRMWARE" ]; then
               REAL_KERNEL=$(echo $RAW_FIRMWARE | grep -oE "k[0-9]+\.[0-9]+\.[0-9]+")
               [ -z "$REAL_KERNEL" ] && REAL_KERNEL="k${{ inputs.kernel_ver }}"
-              
               NEW_NAME="openwrt_official_amlogic_s905d_${REAL_KERNEL}_$(date +%Y.%m.%d).img.gz"
               cp -v "$RAW_FIRMWARE" "./artifact/$NEW_NAME"
-              echo "🎉 最终固件已提取完成: $NEW_NAME"
           else
-            echo "❌ 打包失败: remake 运行完毕但未找到 img.gz 固件！"
+            echo "❌ 打包失败: remake 运行结束但未生成 img.gz 文件！"
             exit 1
           fi
 
-      - name: 8. 生成 Markdown 发布报告
+      - name: 8. 生成 Release 报告
         run: |
           cat <<EOF > release_notes.md
           ### 🚀 N1 专属固件构建成功！
-
-          - **设备模型**: Phicomm N1 (Amlogic s905d)
-          - **OpenWrt 版本**: \`${{ inputs.openwrt_ver }}\`
           - **内核版本**: \`${{ inputs.kernel_ver }}\`
-          - **默认后台 IP**: \`${{ inputs.default_ip }}\`
-          - **IPv6 状态**: $( [ "${{ inputs.disable_ipv6 }}" = "true" ] && echo "🚷 已主动禁用" || echo "✅ 保持开启" )
-
-          ---
-          #### 📦 高级定制插件列表：
-          - **Passwall**: $( [ "${{ inputs.include_passwall }}" = "true" ] && echo "✅ 已深度集成" || echo "❌ 未选择" )
-          - **SSR-Plus**: $( [ "${{ inputs.include_ssr_plus }}" = "true" ] && echo "✅ 已深度集成" || echo "❌ 未选择" )
-          - **ZeroTier**: $( [ "${{ inputs.include_zerotier }}" = "true" ] && echo "✅ 已深度集成" || echo "❌ 未选择" )
-          
-          #### 🔧 用户注入的初始化脚本：
-          \`\`\`bash
-          ${{ inputs.custom_uci }}
-          \`\`\`
+          - **默认 IP**: \`${{ inputs.default_ip }}\`
+          - **插件集成**: 
+            - Passwall: $( [ "${{ inputs.include_passwall }}" = "true" ] && echo "✅" || echo "❌" )
+            - SSR-Plus: $( [ "${{ inputs.include_ssr_plus }}" = "true" ] && echo "✅" || echo "❌" )
+            - ZeroTier: $( [ "${{ inputs.include_zerotier }}" = "true" ] && echo "✅" || echo "❌" )
           EOF
 
-      - name: 9. 上传至 GitHub Releases
+      - name: 9. 发布 Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: N1-${{ inputs.openwrt_ver }}-${{ github.run_id }}
