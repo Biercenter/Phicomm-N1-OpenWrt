@@ -20,11 +20,7 @@ on:
         required: true
         type: boolean
         default: true
-      custom_uci:
-        description: '🔧 首次开机自动执行的 UCI 指令 (可选)'
-        required: false
-        type: string
-        default: "uci set system.@system[0].hostname='Phicomm-N1'; uci commit system"
+      # 移除了 custom_uci 输入框，界面更加清爽
       include_passwall:
         description: '📦 自动集成: luci-app-passwall'
         required: true
@@ -96,14 +92,19 @@ jobs:
           [ "${{ inputs.include_ssr_plus }}" = "true" ] && download_latest_plugin "SSR-Plus-armsr-armv8"
           [ "${{ inputs.include_zerotier }}" = "true" ] && download_latest_plugin "ZeroTier-armsr-armv8"
 
-      - name: 5. 注入自定义配置与本地 Packages
+          if ls ${{ env.LOCAL_PKGS_DIR }}/*.apk 1> /dev/null 2>&1; then
+              CUSTOM_PKGS=$(ls ${{ env.LOCAL_PKGS_DIR }}/*.apk | xargs -n1 basename | cut -d'_' -f1 | tr '\n' ' ')
+              echo "CUSTOM_PKGS=$CUSTOM_PKGS" >> $GITHUB_ENV
+          fi
+
+      - name: 5. 写入预设配置 & 注入自定义包
         run: |
           cd ${{ env.WORK_DIR }}
           mkdir -p config/imagebuilder/files/etc/uci-defaults
           
-          # 写入预设指令
           cat <<EOF > config/imagebuilder/files/etc/uci-defaults/99-custom-settings
           #!/bin/sh
+          # --- 1. 动态生成 IPv6 禁用规则 ---
           if [ "${{ inputs.disable_ipv6 }}" = "true" ]; then
               uci set dhcp.lan.ra='disabled'
               uci set dhcp.lan.ndp='disabled'
@@ -112,90 +113,88 @@ jobs:
               uci commit dhcp
               uci commit network
           fi
-          ${{ inputs.custom_uci }}
+          
+          # --- 2. 注入从 GitHub Variables 读取的通用配置 ---
+          ${{ vars.CUSTOM_UCI }}
+          
+          # --- 3. 注入从 GitHub Secrets 读取的敏感配置 ---
+          ${{ secrets.SECRET_UCI }}
+          
           exit 0
           EOF
           chmod +x config/imagebuilder/files/etc/uci-defaults/99-custom-settings
 
-          # 【核心修复】将下载好的 apk 放入官方指定的 packages 目录
-          mkdir -p packages
-          cp -f ${{ env.LOCAL_PKGS_DIR }}/*.apk packages/ 2>/dev/null || true
-
-          # 【核心修复】从 .apk 内部的 .PKGINFO 元数据中精准提取真实的包名
-          CUSTOM_PKGS=""
-          if ls packages/*.apk 1> /dev/null 2>&1; then
-              echo "📦 正在解析 APK 元数据提取纯净包名..."
-              for file in packages/*.apk; do
-                  # 使用 tar 提取元数据，利用 grep 和 cut 剔除版本号和后缀，只留真实包名
-                  PKG_NAME=$(tar -xOf "$file" .PKGINFO 2>/dev/null | grep '^pkgname = ' | cut -d '=' -f 2 | tr -d ' ')
-                  if [ -n "$PKG_NAME" ]; then
-                      CUSTOM_PKGS="$CUSTOM_PKGS $PKG_NAME"
-                  fi
-              done
-              echo "✅ 提取完成，待注入的插件为: $CUSTOM_PKGS"
+          FINAL_PKGS="${{ env.PACKAGES }} ${{ env.CUSTOM_PKGS }}"
+          sed -i "/make image/ s/PACKAGES=\"[^\"]*\"/PACKAGES=\"$FINAL_PKGS\"/" config/imagebuilder/imagebuilder.sh
+          
+          if [ -n "${{ env.CUSTOM_PKGS }}" ]; then
+              sed -i '/make image/i \    mkdir -p packages && cp -f ${{ env.LOCAL_PKGS_DIR }}/*.apk packages/ 2>/dev/null || true' config/imagebuilder/imagebuilder.sh
           fi
 
-          FINAL_PKGS="${{ env.PACKAGES }} $CUSTOM_PKGS"
-          sed -i "/make image/ s/PACKAGES=\"[^\"]*\"/PACKAGES=\"$FINAL_PKGS\"/" config/imagebuilder/imagebuilder.sh
-
-      - name: 6. 运行 ImageBuilder
+      - name: 6. 运行 ImageBuilder 生成 Rootfs
         run: |
           cd ${{ env.WORK_DIR }}
           sudo chmod +x config/imagebuilder/imagebuilder.sh
           sudo ./config/imagebuilder/imagebuilder.sh "openwrt:${{ inputs.openwrt_ver }}"
 
-      - name: 7. 定向提取 Rootfs 并开始 N1 打包
+      - name: 7. N1 架构重构与固件提取
         run: |
           cd ${{ env.WORK_DIR }}
           mkdir -p openwrt-armsr
           
-          echo "🔍 正在提取 ImageBuilder 生成的底包..."
-          SOURCE_FILE=$(ls output/*rootfs.tar.gz 2>/dev/null | head -n 1)
+          echo "🔍 正在全盘搜索生成的 rootfs.tar.gz..."
+          SOURCE_FILE=$(find . -type f -name "*rootfs.tar.gz" | grep -v "openwrt-armsr" | head -n 1)
           
           if [ -z "$SOURCE_FILE" ]; then
-              SOURCE_FILE=$(find . -type f -name "*rootfs.tar.gz" | grep -v "openwrt-armsr" | head -n 1)
-          fi
-          
-          if [ -n "$SOURCE_FILE" ]; then
-              echo "✅ 锁定底包路径: $SOURCE_FILE"
-              cp -v "$SOURCE_FILE" "openwrt-armsr/openwrt-armsr-armv8-generic-rootfs.tar.gz"
-          else
-              echo "❌ 严重错误: 无法找到 ImageBuilder 生成的底包！"
-              ls -R
+              echo "❌ 严重错误: 未能找到生成的 rootfs.tar.gz 固件底包！"
+              find . -type f -name "*.tar.gz"
               exit 1
           fi
           
-          # 启动 N1 固件生成
+          echo "✅ 成功锁定底包位置: $SOURCE_FILE"
+          cp -v "$SOURCE_FILE" "openwrt-armsr/openwrt-armsr-armv8-generic-rootfs.tar.gz"
+          
           sudo chmod +x remake
           sudo ./remake -b s905d -k ${{ inputs.kernel_ver }} -p ${{ inputs.default_ip }}
           
-          # 提取最终刷机包
           mkdir -p ./artifact/
           RAW_FIRMWARE=$(find . -type f -name "*s905d*.img.gz" | head -n 1)
           
           if [ -n "$RAW_FIRMWARE" ]; then
               REAL_KERNEL=$(echo $RAW_FIRMWARE | grep -oE "k[0-9]+\.[0-9]+\.[0-9]+")
               [ -z "$REAL_KERNEL" ] && REAL_KERNEL="k${{ inputs.kernel_ver }}"
+              
               NEW_NAME="openwrt_official_amlogic_s905d_${REAL_KERNEL}_$(date +%Y.%m.%d).img.gz"
               cp -v "$RAW_FIRMWARE" "./artifact/$NEW_NAME"
+              echo "🎉 最终固件已提取完成: $NEW_NAME"
           else
-            echo "❌ 打包失败: remake 运行结束但未生成 img.gz 文件！"
+            echo "❌ 打包失败: remake 运行完毕但未找到 img.gz 固件！"
             exit 1
           fi
 
-      - name: 8. 生成 Release 报告
+      - name: 8. 生成 Markdown 发布报告
         run: |
           cat <<EOF > release_notes.md
           ### 🚀 N1 专属固件构建成功！
+
+          - **设备模型**: Phicomm N1 (Amlogic s905d)
+          - **OpenWrt 版本**: \`${{ inputs.openwrt_ver }}\`
           - **内核版本**: \`${{ inputs.kernel_ver }}\`
-          - **默认 IP**: \`${{ inputs.default_ip }}\`
-          - **插件集成**: 
-            - Passwall: $( [ "${{ inputs.include_passwall }}" = "true" ] && echo "✅" || echo "❌" )
-            - SSR-Plus: $( [ "${{ inputs.include_ssr_plus }}" = "true" ] && echo "✅" || echo "❌" )
-            - ZeroTier: $( [ "${{ inputs.include_zerotier }}" = "true" ] && echo "✅" || echo "❌" )
+          - **默认后台 IP**: \`${{ inputs.default_ip }}\`
+          - **IPv6 状态**: $( [ "${{ inputs.disable_ipv6 }}" = "true" ] && echo "🚷 已主动禁用" || echo "✅ 保持开启" )
+
+          ---
+          #### 📦 高级定制插件列表：
+          - **Passwall**: $( [ "${{ inputs.include_passwall }}" = "true" ] && echo "✅ 已集成" || echo "❌ 未选择" )
+          - **SSR-Plus**: $( [ "${{ inputs.include_ssr_plus }}" = "true" ] && echo "✅ 已集成" || echo "❌ 未选择" )
+          - **ZeroTier**: $( [ "${{ inputs.include_zerotier }}" = "true" ] && echo "✅ 已集成" || echo "❌ 未选择" )
+          
+          #### 🔧 配置注入状态：
+          - **Repository Variables**: $( [ -n "${{ vars.CUSTOM_UCI }}" ] && echo "✅ 已成功加载" || echo "⚠️ 未设置" )
+          - **Repository Secrets**: $( [ -n "${{ secrets.SECRET_UCI }}" ] && echo "✅ 已成功加载" || echo "⚠️ 未设置" )
           EOF
 
-      - name: 9. 发布 Release
+      - name: 9. 上传至 GitHub Releases
         uses: softprops/action-gh-release@v2
         with:
           tag_name: N1-${{ inputs.openwrt_ver }}-${{ github.run_id }}
