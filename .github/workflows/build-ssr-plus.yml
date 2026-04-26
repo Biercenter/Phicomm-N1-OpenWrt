@@ -78,7 +78,7 @@ jobs:
         working-directory: ./sdk_dir
         run: |
           ./scripts/feeds update -a
-          ./scripts/feeds install -a
+          ./scripts/feeds install -a -f -p helloworld
 
       - name: Generate Defconfig
         working-directory: ./sdk_dir
