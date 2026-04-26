@@ -1,0 +1,86 @@
+name: Build luci-app-passwall
+
+on:
+  workflow_dispatch: # 允许在 GitHub Actions 页面手动触发
+  # push:            # 如果你想在推送代码时自动触发，可以取消注释这两行
+  #   branches: [ "main" ]
+
+env:
+  # 将核心参数提取到环境变量，方便后期修改和微调
+  SDK_URL: "https://downloads.openwrt.org/releases/25.12.2/targets/armsr/armv8/openwrt-sdk-25.12.2-armsr-armv8_gcc-14.3.0_musl.Linux-x86_64.tar.zst"
+  PASSWALL_PKG_REPO: "https://github.com/xiaorouji/openwrt-passwall-packages.git"
+  PASSWALL_LUCI_REPO: "https://github.com/xiaorouji/openwrt-passwall.git"
+  # 指定编译分支，默认为 main
+  REPO_BRANCH: "main" 
+
+jobs:
+  build:
+    name: Build Passwall using SDK
+    runs-on: ubuntu-24.04 # 使用最新的 Ubuntu
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update
+          # 使用 python3-setuptools 适配 Ubuntu 24.04 的环境
+          sudo apt-get install -y build-essential libncurses5-dev gawk git gettext libssl-dev python3-setuptools zlib1g-dev zstd unzip wget curl file
+
+      - name: Download and Extract OpenWrt SDK
+        run: |
+          echo "Downloading SDK..."
+          wget -q -O sdk.tar.zst ${{ env.SDK_URL }}
+          
+          echo "Extracting SDK..."
+          tar -I zstd -xf sdk.tar.zst
+          
+          # 重命名解压后的目录以便后续统一步骤，避免路径中带有动态版本号
+          mv openwrt-sdk-* sdk_dir
+
+      - name: Add Passwall Feeds
+        working-directory: ./sdk_dir
+        run: |
+          # 备份原有的 feeds.conf.default
+          cp feeds.conf.default feeds.conf.default.bak
+          
+          # 追加 Passwall 及其依赖包的第三方源
+          echo "src-git passwall_packages ${{ env.PASSWALL_PKG_REPO }};${{ env.REPO_BRANCH }}" >> feeds.conf.default
+          echo "src-git passwall_luci ${{ env.PASSWALL_LUCI_REPO }};${{ env.REPO_BRANCH }}" >> feeds.conf.default
+          
+          cat feeds.conf.default
+
+      - name: Update and Install Feeds
+        working-directory: ./sdk_dir
+        run: |
+          # 更新所有包列表
+          ./scripts/feeds update -a
+          # 安装所有包的 symlink 到 package/ 目录
+          ./scripts/feeds install -a
+
+      - name: Generate Defconfig
+        working-directory: ./sdk_dir
+        run: |
+          # 生成默认的基础配置
+          make defconfig
+
+      - name: Compile luci-app-passwall
+        working-directory: ./sdk_dir
+        run: |
+          # 使用 V=s 开启详细日志，方便出错时排查问题
+          # SDK 会自动解析并编译依赖的核心组件
+          make package/luci-app-passwall/compile V=s
+
+      - name: Collect APK Files
+        run: |
+          mkdir -p output_apk
+          # 在 SDK 的 bin 目录下递归查找所有编译生成的 .apk 文件并复制出来
+          find sdk_dir/bin/ -type f -name "*.apk" -exec cp {} output_apk/ \;
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: luci-app-passwall-armsr-armv8
+          path: output_apk/*.apk
+          if-no-files-found: error # 如果没有生成任何 apk 则报错，避免静默失败
