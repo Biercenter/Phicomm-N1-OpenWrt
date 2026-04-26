@@ -28,6 +28,10 @@ on:
         description: '📦 集成: luci-app-ssr-plus'
         type: boolean
         default: true
+      include_zerotier:
+        description: '📦 集成: luci-app-zerotier'
+        type: boolean
+        default: true
 
 env:
   LOCAL_PKGS_DIR: ${{ github.workspace }}/pkgs
@@ -40,7 +44,7 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write
-
+    
     steps:
       - name: 1. 环境初始化
         uses: actions/checkout@v4
@@ -61,27 +65,37 @@ jobs:
             local TAG=$(gh api repos/${{ github.repository }}/releases --jq '.[].tag_name' | grep "^$1" | head -n 1)
             [ -n "$TAG" ] && gh release download "$TAG" --repo "${{ github.repository }}" --dir ${LOCAL_PKGS_DIR} --pattern "*.apk"
           }
-          ${{ inputs.include_passwall }} && download_plugin "Passwall"
-          ${{ inputs.include_ssr_plus }} && download_plugin "SSR-Plus"
+          ${{ inputs.include_passwall }} && download_plugin "Passwall-armsr-armv8"
+          ${{ inputs.include_ssr_plus }} && download_plugin "SSR-Plus-armsr-armv8"
+          ${{ inputs.include_zerotier }} && download_plugin "ZeroTier-armsr-armv8"
 
       - name: 4. 配置 ImageBuilder 注入
         run: |
+          # 准备配置目录
           IB_FILES="${WORK_DIR}/config/imagebuilder/files"
           mkdir -p ${IB_FILES}/etc/uci-defaults
           
+          # 写入首启脚本
           cat <<EOF > ${IB_FILES}/etc/uci-defaults/99-custom-settings
           #!/bin/sh
+          # 卸载多余插件
+          for pkg in luci-app-ddns luci-app-dockerman luci-app-frpc luci-app-frps luci-app-upnp luci-app-wol luci-app-ttyd; do
+              apk del -r "\$pkg" 2>/dev/null || true
+          done
+          # IPv6 设置
           if [ "${{ inputs.disable_ipv6 }}" = "true" ]; then
               uci set dhcp.lan.ra='disabled'; uci set dhcp.lan.ndp='disabled'; uci set dhcp.lan.dhcpv6='disabled'
               uci delete network.lan.ip6assign
+              uci commit
           fi
-          ${{ vars.CUSTOM_UCI || '#' }}
-          ${{ secrets.SECRET_UCI || '#' }}
-          uci commit
+          # 注入自定义配置
+          ${{ vars.CUSTOM_UCI }}
+          ${{ secrets.SECRET_UCI }}
           exit 0
           EOF
           chmod +x ${IB_FILES}/etc/uci-defaults/99-custom-settings
 
+          # 解析 APK 包名并修改 ImageBuilder 脚本
           cd ${WORK_DIR}
           CUSTOM_PKGS=""
           if [ -d "${LOCAL_PKGS_DIR}" ] && ls ${LOCAL_PKGS_DIR}/*.apk >/dev/null 2>&1; then
@@ -92,31 +106,39 @@ jobs:
               done
           fi
           sed -i "/make image/ s/PACKAGES=\"/& $CUSTOM_PKGS /" config/imagebuilder/imagebuilder.sh
-          sed -i '/make image/i mkdir -p packages && cp -f ${{ env.LOCAL_PKGS_DIR }}/*.apk packages/ 2>/dev/null || true' config/imagebuilder/imagebuilder.sh
+          sed -i '/make image/i \mkdir -p packages && cp -f ${{ env.LOCAL_PKGS_DIR }}/*.apk packages/ 2>/dev/null || true' config/imagebuilder/imagebuilder.sh
 
-      - name: 5. 执行构建与打包
+- name: 5. 执行构建与打包
         run: |
           cd ${WORK_DIR}
+          # 第一步：生成 Rootfs
           sudo ./config/imagebuilder/imagebuilder.sh "openwrt:${{ inputs.openwrt_ver }}"
           
+          # 第二步：寻找并移动 Rootfs
           mkdir -p openwrt-armsr
           find ./output/ -name "*rootfs.tar.gz" -exec cp {} openwrt-armsr/openwrt-armsr-armv8-generic-rootfs.tar.gz \;
           
+          # 第三步：打包 N1 镜像
           sudo chmod +x remake
           sudo ./remake -b s905d -k ${{ inputs.kernel_ver }} -p ${{ inputs.default_ip }}
           
+          # 第四步：整理归档 (已修复路径，并增加校验)
           mkdir -p artifact
-          # 关键点：修正查找路径为 ./out/
+          
+          # 注意：改去 ./out/ 目录下查找最终固件
           IMG=$(find ./out/ -name "*s905d*.img.gz" | head -n 1)
           
+          # 增加空值检查，如果没找到文件则打印当前目录内容并报错终止，方便后续排查
           if [ -z "$IMG" ]; then
-            echo "❌ 未找到生成的固件文件，请检查 ./out 目录"
-            ls -R ./out
-            exit 1
+              echo "❌ 找不到编译好的固件文件！"
+              echo "🔍 当前 ./out/ 目录下的文件有："
+              ls -al ./out/ || true
+              exit 1
           fi
           
           NEW_NAME="openwrt_N1_${{ inputs.openwrt_ver }}_k${{ inputs.kernel_ver }}_$(date +%Y%m%d).img.gz"
-          cp "$IMG" "artifact/$NEW_NAME"
+          mv "$IMG" "artifact/$NEW_NAME"
+          echo "✅ 固件已成功重命名并移动到 artifact 目录: $NEW_NAME"
 
       - name: 6. 发布 Release
         uses: softprops/action-gh-release@v2
@@ -128,5 +150,6 @@ jobs:
             - **OpenWrt:** ${{ inputs.openwrt_ver }}
             - **Kernel:** ${{ inputs.kernel_ver }}
             - **IP:** ${{ inputs.default_ip }}
+            - **默认密码:** password
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
