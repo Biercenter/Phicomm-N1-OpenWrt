@@ -146,7 +146,7 @@ jobs:
           # 4. 归档结果
           mkdir -p artifact
           # 搜索生成的 s905d 固件
-          IMG_PATH=$(find ./out/ -name "*s905d*.img.gz" | head -n 1)
+          IMG_PATH=$(find ./openwrt/out/ -name "*s905d*.img.gz" | head -n 1)
           if [ -n "$IMG_PATH" ]; then
               IMG_NAME=$(basename "$IMG_PATH")
               sudo mv "$IMG_PATH" "artifact/$IMG_NAME"
