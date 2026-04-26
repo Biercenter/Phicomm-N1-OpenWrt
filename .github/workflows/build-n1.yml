@@ -108,7 +108,7 @@ jobs:
           sed -i "/make image/ s/PACKAGES=\"/& $CUSTOM_PKGS /" config/imagebuilder/imagebuilder.sh
           sed -i '/make image/i \mkdir -p packages && cp -f ${{ env.LOCAL_PKGS_DIR }}/*.apk packages/ 2>/dev/null || true' config/imagebuilder/imagebuilder.sh
 
-        - name: 5. 执行构建与打包
+      - name: 5. 执行构建与打包
         run: |
           cd ${WORK_DIR}
           # 第一步：生成 Rootfs
@@ -122,23 +122,18 @@ jobs:
           sudo chmod +x remake
           sudo ./remake -b s905d -k ${{ inputs.kernel_ver }} -p ${{ inputs.default_ip }}
           
-          # 第四步：整理归档 (已修复路径，并增加校验)
+          # 第四步：整理归档
           mkdir -p artifact
-          
-          # 注意：改去 ./out/ 目录下查找最终固件
           IMG=$(find ./out/ -name "*s905d*.img.gz" | head -n 1)
           
-          # 增加空值检查，如果没找到文件则打印当前目录内容并报错终止，方便后续排查
           if [ -z "$IMG" ]; then
               echo "❌ 找不到编译好的固件文件！"
-              echo "🔍 当前 ./out/ 目录下的文件有："
               ls -al ./out/ || true
               exit 1
           fi
           
           NEW_NAME="openwrt_N1_${{ inputs.openwrt_ver }}_k${{ inputs.kernel_ver }}_$(date +%Y%m%d).img.gz"
           mv "$IMG" "artifact/$NEW_NAME"
-          echo "✅ 固件已成功重命名并移动到 artifact 目录: $NEW_NAME"
 
       - name: 6. 发布 Release
         uses: softprops/action-gh-release@v2
