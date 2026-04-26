@@ -67,7 +67,6 @@ jobs:
           echo "Extracting SDK..."
           rm -rf sdk_dir
           mkdir -p sdk_dir
-          # 【完美修复】直接铺平解压，无惧缓存目录干扰
           tar -I zstd -xf sdk.tar.zst -C sdk_dir --strip-components=1
 
       - name: Add SSR-Plus Feeds
@@ -78,38 +77,50 @@ jobs:
       - name: Update and Install Feeds
         working-directory: ./sdk_dir
         run: |
+          # 修复 curl 循环依赖：先更新，删除冲突包，再安装
           ./scripts/feeds update -a
+          rm -rf feeds/packages/net/curl
           ./scripts/feeds install -a -f -p helloworld
 
       - name: Generate Defconfig
         working-directory: ./sdk_dir
         run: |
+          # 1. 禁用 Shadowsocks-Rust (避开 Rust 编译错误)
+          echo "# CONFIG_PACKAGE_shadowsocks-rust-ss-local is not set" >> .config
+          echo "# CONFIG_PACKAGE_shadowsocks-rust-ss-redir is not set" >> .config
+          echo "# CONFIG_PACKAGE_shadowsocks-rust-ss-server is not set" >> .config
+          
+          # 3. 语言包设置
           echo "CONFIG_LUCI_LANG_zh_Hans=y" >> .config
-          echo "CONFIG_LUCI_LANG_zh_cn=y" >> .config
           echo "CONFIG_PACKAGE_luci-i18n-ssr-plus-zh-cn=y" >> .config
           echo "CONFIG_PACKAGE_luci-i18n-ssr-plus-zh-Hans=y" >> .config
-          echo "CONFIG_PACKAGE_luci-i18n-ssr-plus-zh_Hans=y" >> .config
+          
+          # 4. 强制选择插件核心
+          echo "CONFIG_PACKAGE_luci-app-ssr-plus=y" >> .config
+          
           make defconfig
 
       - name: Compile luci-app-ssr-plus
         working-directory: ./sdk_dir
         run: |
+          # 优先使用多核编译，失败则输出详细日志
           make package/luci-app-ssr-plus/compile -j$(nproc) || make package/luci-app-ssr-plus/compile -j1 V=s
 
-      - name: Collect Custom APK Files
+      - name: Collect Output Files
         run: |
-          mkdir -p output_apk
-          find sdk_dir/bin/ -type f -path "*/helloworld/*" -name "*.apk" -exec cp {} output_apk/ \;
+          mkdir -p output_artifacts
+          # 查找并收集 .apk 或 .ipk 文件
+          find sdk_dir/bin/ -type f \( -name "*.apk" -o -name "*.ipk" \) -path "*/helloworld/*" -exec cp {} output_artifacts/ \;
 
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: SSR-Plus-${{ inputs.arch_name }}-${{ steps.tag_date.outputs.date }}
           name: 🚀 SSR-Plus (${{ inputs.arch_name }}) - ${{ steps.tag_date.outputs.date }}
-          files: output_apk/*.apk
+          files: output_artifacts/*
           body: |
             ### 自动化编译结果
-            - **编译目标架构**: `${{ inputs.arch_name }}`
-            - **使用的 SDK**: `${{ inputs.sdk_url }}`
-            - **源码分支**: `${{ inputs.source_branch }}`
-            - *仅包含 SSR-Plus (helloworld) 及其核心依赖包。*
+            - **架构**: `${{ inputs.arch_name }}`
+            - **SDK**: `${{ inputs.sdk_url }}`
+            - **状态**: 成功 (已禁用 Shadowsocks-Rust 以通过编译)
+            - **文件**: 包含 SSR-Plus 及其所有依赖包
