@@ -1,4 +1,4 @@
-name: Universal Build luci-app-ssr-plus
+name: Build luci-app-ssr-plus
 
 on:
   workflow_dispatch:
