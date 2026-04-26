@@ -132,8 +132,8 @@ jobs:
               exit 1
           fi
           
-          NEW_NAME="openwrt_N1_${{ inputs.openwrt_ver }}_k${{ inputs.kernel_ver }}_$(date +%Y%m%d).img.gz"
-          sudo mv "$IMG" "artifact/$NEW_NAME"
+          # NEW_NAME="openwrt_N1_${{ inputs.openwrt_ver }}_k${{ inputs.kernel_ver }}_$(date +%Y%m%d).img.gz"
+          sudo mv "$IMG" "artifact/$IMG"
 
       - name: 6. 发布 Release
         uses: softprops/action-gh-release@v2
