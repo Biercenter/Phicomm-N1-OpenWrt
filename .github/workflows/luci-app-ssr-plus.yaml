@@ -1,0 +1,108 @@
+name: Universal Build luci-app-ssr-plus
+
+on:
+  workflow_dispatch:
+    # 定义可视化界面的输入参数
+    inputs:
+      sdk_url:
+        description: '🎯 OpenWrt SDK 下载链接 (.tar.zst)'
+        required: true
+        type: string
+        default: 'https://downloads.openwrt.org/releases/25.12.2/targets/armsr/armv8/openwrt-sdk-25.12.2-armsr-armv8_gcc-14.3.0_musl.Linux-x86_64.tar.zst'
+      arch_name:
+        description: '🏷️ 架构名称 (用于输出文件命名，如 armsr-armv8, x86_64)'
+        required: true
+        type: string
+        default: 'armsr-armv8'
+      source_branch:
+        description: '🌿 SSR-Plus (helloworld) 源码分支'
+        required: true
+        type: string
+        default: 'master' # fw876 的仓库主分支习惯命名为 master
+      use_cache:
+        description: '⚡ 启用源码缓存 (加快二次编译速度)'
+        required: true
+        type: boolean
+        default: true
+
+env:
+  # SSR-Plus 官方源码库地址 (helloworld 项目)
+  HELLOWORLD_REPO: "https://github.com/fw876/helloworld.git"
+
+jobs:
+  build:
+    name: Build SSR-Plus (${{ inputs.arch_name }})
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install System Dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git libncurses5-dev libssl-dev python3-setuptools rsync swig unzip zlib1g-dev file wget curl zstd
+
+      - name: Cache Downloaded Sources
+        if: ${{ inputs.use_cache }}
+        uses: actions/cache@v4
+        with:
+          path: sdk_dir/dl
+          key: ${{ runner.os }}-openwrt-dl-${{ inputs.arch_name }}-${{ hashFiles('**/*.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-openwrt-dl-${{ inputs.arch_name }}-
+
+      - name: Download and Extract OpenWrt SDK
+        run: |
+          echo "Downloading SDK from: ${{ inputs.sdk_url }}"
+          wget -q -O sdk.tar.zst "${{ inputs.sdk_url }}"
+          
+          echo "Extracting SDK..."
+          tar -I zstd -xf sdk.tar.zst
+          mv openwrt-sdk-* sdk_dir
+
+      - name: Add SSR-Plus Feeds
+        working-directory: ./sdk_dir
+        run: |
+          # 动态读取填写的源码分支，追加 helloworld 源
+          echo "src-git helloworld ${{ env.HELLOWORLD_REPO }};${{ inputs.source_branch }}" >> feeds.conf.default
+          cat feeds.conf.default
+
+      - name: Update and Install Feeds
+        working-directory: ./sdk_dir
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Generate Defconfig
+        working-directory: ./sdk_dir
+        run: |
+          # 【终极兼容】同时写入新老版本的语言全局变量和 SSR-Plus 包名
+          echo "CONFIG_LUCI_LANG_zh_Hans=y" >> .config
+          echo "CONFIG_LUCI_LANG_zh_cn=y" >> .config
+          echo "CONFIG_PACKAGE_luci-i18n-ssr-plus-zh-cn=y" >> .config
+          echo "CONFIG_PACKAGE_luci-i18n-ssr-plus-zh-Hans=y" >> .config
+          echo "CONFIG_PACKAGE_luci-i18n-ssr-plus-zh_Hans=y" >> .config
+          
+          make defconfig
+
+      - name: Compile luci-app-ssr-plus
+        working-directory: ./sdk_dir
+        run: |
+          # Fail-Safe 编译：优先多核，失败回退单核排错
+          make package/luci-app-ssr-plus/compile -j$(nproc) || make package/luci-app-ssr-plus/compile -j1 V=s
+
+      - name: Collect APK Files
+        run: |
+          mkdir -p output_apk
+          find sdk_dir/bin/ -type f -name "*.apk" -exec cp {} output_apk/ \;
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          # 动态命名输出的压缩包
+          name: luci-app-ssr-plus-${{ inputs.arch_name }}
+          path: output_apk/*.apk
+          if-no-files-found: error
