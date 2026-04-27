@@ -88,7 +88,7 @@ jobs:
 
           echo "添加 files/etc/uci-defaults/"
           mkdir -p config/imagebuilder/files/etc/uci-defaults/
-          cat > config/imagebuilder/files/etc/uci-defaults/99-custom-settings << 'EOF'
+          cat > config/imagebuilder/files/etc/uci-defaults/zzz-custom-settings << 'EOF'
           # /etc/config/dhcp
           uci del dhcp.lan.ra
           uci del dhcp.lan.ra_slaac
@@ -96,7 +96,7 @@ jobs:
           uci del dhcp.lan.dhcpv6
           uci commit dhcp
           EOF
-          chmod +x config/imagebuilder/files/etc/uci-defaults/99-custom-settings
+          chmod +x config/imagebuilder/files/etc/uci-defaults/zzz-custom-settings
 
           echo "开始制作 openwrt-armsr-armv8-generic-rootfs.tar.gz"
           sudo ./config/imagebuilder/imagebuilder.sh openwrt:25.12.2
