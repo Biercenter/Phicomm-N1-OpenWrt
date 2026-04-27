@@ -118,7 +118,7 @@ jobs:
           tag_name: ${{ steps.tag.outputs.release_tag }}
           name: OpenWrt S905D 自动构建 - ${{ steps.tag.outputs.release_tag }}
           # 此处使用通配符匹配输出目录中的所有 img.gz 格式固件，兼容你代码中不断变化的日期后缀
-          files: amlogic-s9xxx-openwrt/out/*.img.gz
+          files: amlogic-s9xxx-openwrt/openwrt/out/*.img.gz
           draft: false
           prerelease: false
         env:
