@@ -1,172 +1,125 @@
-name: Build Phicomm N1 OpenWrt
+name: Build and Release OpenWrt
 
+# 配置触发条件
 on:
-  workflow_dispatch:
-    inputs:
-      openwrt_ver:
-        description: '🎯 OpenWrt SDK 版本'
-        required: true
-        default: '25.12.2'
-      kernel_ver:
-        description: '🐧 Amlogic 内核版本'
-        required: true
-        default: '6.18.y'
-      default_ip:
-        description: '🌐 路由器默认后台 IP'
-        required: true
-        default: '192.168.100.1'
-      disable_ipv6:
-        description: '🚷 禁用 IPv6'
-        required: true
-        type: boolean
-        default: true
-      include_passwall:
-        description: '📦 集成: luci-app-passwall'
-        type: boolean
-        default: true
-      include_ssr_plus:
-        description: '📦 集成: luci-app-ssr-plus'
-        type: boolean
-        default: true
-      include_zerotier:
-        description: '📦 集成: luci-app-zerotier'
-        type: boolean
-        default: true
+  workflow_dispatch: # 允许在 GitHub Actions 页面手动点击运行
+  # push:            # 如果你想每次提交代码都自动运行，可以取消注释这行
+  #   branches: [ "main" ]
 
-env:
-  LOCAL_PKGS_DIR: ${{ github.workspace }}/pkgs
-  WORK_DIR: ${{ github.workspace }}/amlogic-s9xxx-openwrt
-  TZ: Asia/Shanghai
+# 授予创建 Release 的必要权限
+permissions:
+  contents: write
 
 jobs:
-  build_firmware:
-    name: 构建 N1 固件
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: write
-    
+  build:
+    name: Build OpenWrt
+    runs-on: ubuntu-24.04 # 满足系统要求：Ubuntu 24.04
+
     steps:
-      - name: 1. 环境初始化
+      - name: 检出当前仓库代码
         uses: actions/checkout@v4
 
-      - name: 2. 准备构建工具与依赖
+      - name: 初始化环境并安装依赖
         run: |
-          git clone --depth 1 https://github.com/ophub/amlogic-s9xxx-openwrt.git ${WORK_DIR}
           sudo apt-get update
-          sudo apt-get install -y $(cat ${WORK_DIR}/make-openwrt/scripts/ubuntu2404-make-openwrt-depends) gh qemu-user-static binfmt-support
-          sudo update-binfmts --enable
+          # 1. 下载目标仓库
+          git clone --depth 1 https://github.com/ophub/amlogic-s9xxx-openwrt.git
+          cd amlogic-s9xxx-openwrt
+          # 2. 在仓库目录下执行依赖安装
+          sudo apt-get install -y $(cat make-openwrt/scripts/ubuntu2404-make-openwrt-depends)
 
-      - name: 3. 下载第三方插件
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: 执行自定义编译脚本
         run: |
-          mkdir -p ${LOCAL_PKGS_DIR}
+          # 进入刚才克隆的目录
+          cd amlogic-s9xxx-openwrt
           
-          # 定义下载函数：增加模糊匹配和日志输出
-          download_plugin() {
-            echo "🔍 正在检索关键字为 [$1] 的 Release..."
-            # 获取所有 tag 并通过 grep 匹配关键字
-            local TAG=$(gh api repos/${{ github.repository }}/releases --jq '.[].tag_name' | grep -i "$1" | head -n 1)
-            
-            if [ -z "$TAG" ]; then
-              echo "❌ 错误: 未能在仓库中找到包含 [$1] 的 Release 标签。"
-              return 0
-            fi
-            
-            echo "✅ 找到标签 [$TAG]，开始下载 APK 文件..."
-            gh release download "$TAG" --repo "${{ github.repository }}" --dir ${LOCAL_PKGS_DIR} --pattern "*.apk"
-          }
-
-          # 根据输入决定是否下载
-          [ "${{ inputs.include_passwall }}" = "true" ] && download_plugin "Passwall"
-          [ "${{ inputs.include_ssr_plus }}" = "true" ] && download_plugin "SSR-Plus"
-          [ "${{ inputs.include_zerotier }}" = "true" ] && download_plugin "ZeroTier"
-
-          echo "---------------------------------------"
-          echo "📂 最终待集成插件列表:"
-          ls ${LOCAL_PKGS_DIR} || echo "空目录"
-
-      - name: 4. 配置 ImageBuilder 注入
-        run: |
-          # 准备配置目录
-          IB_FILES="${WORK_DIR}/config/imagebuilder/files"
-          mkdir -p ${IB_FILES}/etc/uci-defaults
+          echo "更改 config/imagebuilder/config 和 config/imagebuilder/imagebuilder.sh"
+          sed -i 's/^CONFIG_PACKAGE/# &/' config/imagebuilder/config
+          sed -i '$a\
+          CONFIG_PACKAGE_luci-app-passwall=y\
+          CONFIG_PACKAGE_luci-app-zerotier=y\
+          CONFIG_PACKAGE_luci-app-ssr-plus=y\
+          CONFIG_PACKAGE_luci-i18n-passwall-zh-cn=y\
+          CONFIG_PACKAGE_luci-i18n-zerotier-zh-cn=y\
+          CONFIG_PACKAGE_luci-i18n-ssr-plus-zh-cn=y\
+          CONFIG_PACKAGE_luci-i18n-package-manager-zh-cn=y\
+          CONFIG_PACKAGE_luci-i18n-firewall-zh-cn=y\
+          CONFIG_PACKAGE_openssh-sftp-server=y\
+          CONFIG_PACKAGE_kmod-nft-tproxy=y\
+          CONFIG_PACKAGE_kmod-nft-socket=y\
+          ' config/imagebuilder/config
           
-          # 写入首启配置脚本 (设置 IP 和 IPv6)
-          cat <<EOF > ${IB_FILES}/etc/uci-defaults/99-custom-settings
-          #!/bin/sh
-          # IPv6 设置
-          if [ "${{ inputs.disable_ipv6 }}" = "true" ]; then
-              uci set dhcp.lan.ra='disabled'; uci set dhcp.lan.ndp='disabled'; uci set dhcp.lan.dhcpv6='disabled'
-              uci delete network.lan.ip6assign
-              uci commit
-          fi
-          exit 0
-          EOF
-          chmod +x ${IB_FILES}/etc/uci-defaults/99-custom-settings
-
-          # 解析 APK 包名并修改 ImageBuilder 脚本
-          cd ${WORK_DIR}
-          CUSTOM_PKGS=""
-          if [ -d "${LOCAL_PKGS_DIR}" ] && ls ${LOCAL_PKGS_DIR}/*.apk >/dev/null 2>&1; then
-              # 拷贝到 ImageBuilder 默认识别的包目录
-              mkdir -p packages
-              cp -f ${LOCAL_PKGS_DIR}/*.apk packages/
+          sed -i -E 's/\b(docker(-compose)?|dockerd)\b\s*//g' config/imagebuilder/imagebuilder.sh
+          
+          # 注意：为了防止 Python 报错，这里的缩进做了严格的左对齐处理
+          cat > /tmp/insert_code.txt << 'EOF'
+          PLUGINS=("ZeroTier" "SSR-Plus" "Passwall")
+          for NAME in "${PLUGINS[@]}"; do
+              echo "-----------------------------------------------"
+              echo "正在搜索 $NAME 的最新发布版本..."
               
-              # 提取每个 APK 的真实包名（用于注入 PACKAGES 变量）
-              for f in packages/*.apk; do
-                  # 通过提取 .PKGINFO 获取真正的包名
-                  NAME=$(tar -xOf "$f" .PKGINFO 2>/dev/null | awk -F ' = ' '/pkgname/ {print $2}')
-                  if [ -n "$NAME" ]; then
-                      CUSTOM_PKGS="$CUSTOM_PKGS $NAME"
-                      echo "➕ 发现插件包: $NAME"
-                  fi
-              done
-          fi
+              DOWNLOAD_URLS=$(curl -s https://api.github.com/repos/Biercenter/Phicomm-N1-OpenWrt/releases | \
+              python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          for release in data:
+              if '$NAME' in release['name']:
+                  for asset in release['assets']:
+                      if asset['name'].endswith('.apk'):
+                          print(asset['browser_download_url'])
+                  break
+          ")
 
-          # 修改 ophub 的 imagebuilder.sh 脚本，强制注入包名到 PACKAGES 变量中
-          # 同时确保在编译时会拷贝本地 packages 目录
-          sed -i "/make image/ s/PACKAGES=\"/& $CUSTOM_PKGS /" config/imagebuilder/imagebuilder.sh
-          sed -i '/make image/i \mkdir -p packages && cp -f ${{ env.LOCAL_PKGS_DIR }}/*.apk packages/ 2>/dev/null || true' config/imagebuilder/imagebuilder.sh
+              if [ -z "$DOWNLOAD_URLS" ]; then
+                  echo "❌ 未找到 $NAME 的相关 apk 文件。"
+              else
+                  echo "✅ 找到 $NAME 的文件，开始下载..."
+                  echo "$DOWNLOAD_URLS" | xargs -n 1 wget -q --show-progress -nc
+              fi
+          done
 
-      - name: 5. 执行构建与打包
+          echo "-----------------------------------------------"
+          echo "全部下载完成！文件保存在: $(pwd)"
+          ls -lh *.apk
+          EOF
+          
+          sed -i '/Download other luci-app-xxx/r /tmp/insert_code.txt' config/imagebuilder/imagebuilder.sh
+          rm /tmp/insert_code.txt
+
+          echo "添加 files/etc/uci-defaults/"
+          mkdir -p config/imagebuilder/files/etc/uci-defaults/
+          cat > config/imagebuilder/files/etc/uci-defaults/99-custom-settings << 'EOF'
+          # /etc/config/dhcp
+          uci del dhcp.lan.ra
+          uci del dhcp.lan.ra_slaac
+          uci del dhcp.lan.ra_flags
+          uci del dhcp.lan.dhcpv6
+          uci commit dhcp
+          EOF
+          chmod +x config/imagebuilder/files/etc/uci-defaults/99-custom-settings
+
+          echo "开始制作 openwrt-armsr-armv8-generic-rootfs.tar.gz"
+          sudo ./config/imagebuilder/imagebuilder.sh openwrt:25.12.2
+
+          echo "开始打包固件"
+          mkdir openwrt-armsr/
+          sudo mv output/openwrt-*-rootfs.tar.gz openwrt-armsr/openwrt-armsr-armv8-generic-rootfs.tar.gz
+          sudo ./remake -b s905d -k 6.18.y -p 192.168.100.1
+
+      - name: 生成 Release 标签
+        id: tag
         run: |
-          cd ${WORK_DIR}
-          # 1. 生成 Rootfs (基于 OpenWrt SDK)
-          sudo ./config/imagebuilder/imagebuilder.sh "openwrt:${{ inputs.openwrt_ver }}"
-          
-          # 2. 准备打包环境
-          mkdir -p openwrt-armsr
-          find ./output/ -name "*rootfs.tar.gz" -exec cp {} openwrt-armsr/openwrt-armsr-armv8-generic-rootfs.tar.gz \;
-          
-          # 3. 打包为 N1 适用的 .img 镜像
-          sudo chmod +x remake
-          sudo ./remake -b s905d -k ${{ inputs.kernel_ver }} -p ${{ inputs.default_ip }}
-          
-          # 4. 归档结果
-          mkdir -p artifact
-          # 搜索生成的 s905d 固件
-          IMG_PATH=$(find ./openwrt/out/ -name "*s905d*.img.gz" | head -n 1)
-          if [ -n "$IMG_PATH" ]; then
-              IMG_NAME=$(basename "$IMG_PATH")
-              sudo mv "$IMG_PATH" "artifact/$IMG_NAME"
-              sudo chown $USER:$USER "artifact/$IMG_NAME"
-              echo "✅ 固件已移动到 artifact 目录: $IMG_NAME"
-          else
-            echo "❌ 未找到编译好的 s905d 镜像文件！"
-            exit 1
-          fi
+          # 自动生成类似 2026.04.27-1430 格式的标签名称
+          echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
 
-      - name: 6. 发布 Release
+      - name: 发布固件到 Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: N1-${{ inputs.openwrt_ver }}-${{ github.run_id }}
-          files: ${{ env.WORK_DIR }}/artifact/*.img.gz
-          body: |
-            ### 🚀 N1 固件构建完成
-            - **OpenWrt 版本:** ${{ inputs.openwrt_ver }}
-            - **内核版本:** ${{ inputs.kernel_ver }}
-            - **后台地址:** ${{ inputs.default_ip }}
-            - **默认密码:** password
+          tag_name: ${{ steps.tag.outputs.release_tag }}
+          name: OpenWrt S905D 自动构建 - ${{ steps.tag.outputs.release_tag }}
+          # 此处使用通配符匹配输出目录中的所有 img.gz 格式固件，兼容你代码中不断变化的日期后缀
+          files: amlogic-s9xxx-openwrt/out/*.img.gz
+          draft: false
+          prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
