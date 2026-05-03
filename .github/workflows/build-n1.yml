@@ -1,14 +1,33 @@
-name: Build OpenWrt for Amlogic s905d
+name: 制作 Amlogic s905d OpenWrt 固件
 
 on:
-  workflow_dispatch: # 允许在 GitHub Actions 页面手动点击运行
+  workflow_dispatch:
+    inputs:
+      with_passwall:
+        description: '是否集成 Passwall'
+        required: false
+        type: boolean
+        default: true
+      with_ssr_plus:
+        description: '是否集成 SSR-Plus'
+        required: false
+        type: boolean
+        default: true
+      with_zerotier:
+        description: '是否集成 ZeroTier'
+        required: false
+        type: boolean
+        default: true
 
 jobs:
   build:
     runs-on: ubuntu-24.04
-    
+    # 授予发布 Release 所需的权限
+    permissions:
+      contents: write
+
     steps:
-      - name: Free Disk Space
+      - name: 1. 释放磁盘空间
         uses: jlumbroso/free-disk-space@main
         with:
           tool-cache: true
@@ -19,108 +38,143 @@ jobs:
           docker-images: true
           swap-storage: true
 
-      - name: Clone Repository & Install Dependencies
+      - name: 2. 克隆源码与安装依赖
         run: |
-          echo "==== Clone Repository ===="
+          echo "==== 正在克隆 ophub 仓库 ===="
           git clone --depth 1 https://github.com/ophub/amlogic-s9xxx-openwrt.git
           cd amlogic-s9xxx-openwrt
           
-          echo "==== Install Ubuntu 24.04 Dependencies ===="
+          echo "==== 正在安装 Ubuntu 24.04 编译环境依赖 ===="
           sudo apt-get update -y
           sudo apt-get install -y $(cat make-openwrt/scripts/ubuntu2404-make-openwrt-depends)
-          # 清理 apt 缓存，进一步节约磁盘空间
-          sudo apt-get clean 
+          sudo apt-get clean
 
-      - name: Modify Configuration and Scripts
+      - name: 3. 动态配置插件列表
         working-directory: amlogic-s9xxx-openwrt
         run: |
-          echo "==== 更改config/imagebuilder/config和config/imagebuilder/imagebuilder.sh ===="
-          sed -i 's/^CONFIG_PACKAGE/# &/' config/imagebuilder/config
-          sed -i '$a\
-          CONFIG_PACKAGE_luci-app-passwall=y\
-          CONFIG_PACKAGE_luci-app-zerotier=y\
-          CONFIG_PACKAGE_luci-app-ssr-plus=y\
-          CONFIG_PACKAGE_luci-i18n-passwall-zh-cn=y\
-          CONFIG_PACKAGE_luci-i18n-zerotier-zh-cn=y\
-          CONFIG_PACKAGE_luci-i18n-ssr-plus-zh-cn=y\
-          CONFIG_PACKAGE_luci-i18n-package-manager-zh-cn=y\
-          CONFIG_PACKAGE_luci-i18n-firewall-zh-cn=y\
-          CONFIG_PACKAGE_openssh-sftp-server=y\
-          CONFIG_PACKAGE_kmod-nft-tproxy=y\
-          CONFIG_PACKAGE_kmod-nft-socket=y\
-          ' config/imagebuilder/config
+          echo "==== 正在根据用户选择配置插件 ===="
+          CONFIG_FILE="config/imagebuilder/config"
           
+          # 注释掉默认的包配置，由我们后面动态添加
+          sed -i 's/^CONFIG_PACKAGE/# &/' $CONFIG_FILE
+          
+          # 基础必须包
+          {
+            echo "CONFIG_PACKAGE_luci-i18n-package-manager-zh-cn=y"
+            echo "CONFIG_PACKAGE_luci-i18n-firewall-zh-cn=y"
+            echo "CONFIG_PACKAGE_openssh-sftp-server=y"
+            echo "CONFIG_PACKAGE_kmod-nft-tproxy=y"
+            echo "CONFIG_PACKAGE_kmod-nft-socket=y"
+          } >> $CONFIG_FILE
+
+          # 根据 Actions 页面勾选情况添加插件
+          if [ "${{ github.event.inputs.with_passwall }}" == "true" ]; then
+            echo "CONFIG_PACKAGE_luci-app-passwall=y" >> $CONFIG_FILE
+            echo "CONFIG_PACKAGE_luci-i18n-passwall-zh-cn=y" >> $CONFIG_FILE
+          fi
+
+          if [ "${{ github.event.inputs.with_ssr_plus }}" == "true" ]; then
+            echo "CONFIG_PACKAGE_luci-app-ssr-plus=y" >> $CONFIG_FILE
+            echo "CONFIG_PACKAGE_luci-i18n-ssr-plus-zh-cn=y" >> $CONFIG_FILE
+          fi
+
+          if [ "${{ github.event.inputs.with_zerotier }}" == "true" ]; then
+            echo "CONFIG_PACKAGE_luci-app-zerotier=y" >> $CONFIG_FILE
+            echo "CONFIG_PACKAGE_luci-i18n-zerotier-zh-cn=y" >> $CONFIG_FILE
+          fi
+
+          echo "==== 移除多余服务(Docker/TTYD)并精简脚本 ===="
           sed -i -E 's/\b(docker(-compose)?|dockerd)\b\s*//g' config/imagebuilder/imagebuilder.sh
           sed -i 's/tini ttyd tune2fs/tini tune2fs/g' config/imagebuilder/imagebuilder.sh
 
-      - name: Inject Plugin Download Script
+      - name: 4. 注入插件自动化下载逻辑
         working-directory: amlogic-s9xxx-openwrt
         run: |
-          cat > /tmp/insert_code.txt << 'EOF'
-          PLUGINS=("ZeroTier" "SSR-Plus" "Passwall")
-          for NAME in "${PLUGINS[@]}"; do
+          # 构建需要下载的插件数组
+          SELECTED_PLUGINS=()
+          [ "${{ github.event.inputs.with_zerotier }}" == "true" ] && SELECTED_PLUGINS+=("ZeroTier")
+          [ "${{ github.event.inputs.with_ssr_plus }}" == "true" ] && SELECTED_PLUGINS+=("SSR-Plus")
+          [ "${{ github.event.inputs.with_passwall }}" == "true" ] && SELECTED_PLUGINS+=("Passwall")
+
+          # 将数组转为字符串形式存入脚本
+          PLUGIN_LIST_STR=$(printf '"%s" ' "${SELECTED_PLUGINS[@]}")
+
+          cat > /tmp/insert_code.txt << EOF
+          PLUGINS=($PLUGIN_LIST_STR)
+          for NAME in "\${PLUGINS[@]}"; do
               echo "-----------------------------------------------"
-              echo "正在搜索 $NAME 的最新发布版本..."
-              
-              DOWNLOAD_URLS=$(curl -s https://api.github.com/repos/Biercenter/Phicomm-N1-OpenWrt/releases | \
+              echo "正在搜索 \$NAME 的最新发布版本..."
+              DOWNLOAD_URLS=\$(curl -s https://api.github.com/repos/Biercenter/Phicomm-N1-OpenWrt/releases | \\
               python3 -c "
           import sys, json
           data = json.load(sys.stdin)
           for release in data:
-              if '$NAME' in release['name']:
+              if '\$NAME' in release['name']:
                   for asset in release['assets']:
                       if asset['name'].endswith('.apk'):
                           print(asset['browser_download_url'])
                   break
               ")
-
-              if [ -z "$DOWNLOAD_URLS" ]; then
-                  echo "❌ 未找到 $NAME 的相关 apk 文件。"
+              if [ -z "\$DOWNLOAD_URLS" ]; then
+                  echo "❌ 未找到 \$NAME 的相关 apk 文件。"
               else
-                  echo "✅ 找到 $NAME 的文件，开始下载..."
-                  echo "$DOWNLOAD_URLS" | xargs -n 1 wget -q --show-progress -nc
+                  echo "✅ 找到 \$NAME 的文件，开始下载..."
+                  echo "\$DOWNLOAD_URLS" | xargs -n 1 wget -q --show-progress -nc
               fi
           done
-
-          echo "-----------------------------------------------"
-          echo "全部下载完成！文件保存在: $(pwd)"
-          ls -lh *.apk
           EOF
+          
+          # 将下载逻辑插入到 imagebuilder.sh 脚本的对应位置
           sed -i '/Download other luci-app-xxx/r /tmp/insert_code.txt' config/imagebuilder/imagebuilder.sh
           rm /tmp/insert_code.txt
 
-      - name: Add Custom UCI Defaults
+      - name: 5. 配置自定义启动脚本 (UCI Defaults)
         working-directory: amlogic-s9xxx-openwrt
         run: |
-          echo "==== 添加files/etc/uci-defaults/ ===="
+          echo "==== 正在添加自定义初次启动设置 ===="
           mkdir -p config/imagebuilder/files/etc/uci-defaults/
           cat > config/imagebuilder/files/etc/uci-defaults/zzz-custom-settings << 'EOF'
+          # 这里可以放置你初次开机想执行的命令
           cd /mnt/mmcblk2p4/uci-set/
-          ./full.sh
+          [ -f "./full.sh" ] && chmod +x ./full.sh && ./full.sh
           EOF
           chmod +x config/imagebuilder/files/etc/uci-defaults/zzz-custom-settings
 
-      - name: Build OpenWrt RootFS
+      - name: 6. 编译 RootFS 根文件系统
         working-directory: amlogic-s9xxx-openwrt
         run: |
-          echo "==== 开始制作openwrt-armsr-armv8-generic-rootfs.tar.gz ===="
+          echo "==== 正在通过 ImageBuilder 制作 RootFS ===="
+          # 使用 sudo 确保权限，版本号为 25.12.2
           sudo ./config/imagebuilder/imagebuilder.sh openwrt:25.12.2
 
-      - name: Package Firmware
+      - name: 7. 打包成 Amlogic 写入镜像 (.img.gz)
         working-directory: amlogic-s9xxx-openwrt
         run: |
-          echo "==== 开始打包openwrt_official_amlogic_s905d_k6.18.24_2026.04.26.img.gz ===="
+          echo "==== 正在打包 s905d 专用固件 ===="
           mkdir -p openwrt-armsr/
+          # 移动生成的 rootfs 到指定目录供 remake 使用
           sudo mv output/openwrt-*-rootfs.tar.gz openwrt-armsr/openwrt-armsr-armv8-generic-rootfs.tar.gz
+          # 执行打包命令，指定内核 6.18.y 和默认 IP
           sudo ./remake -b s905d -k 6.18.y -p 192.168.100.1
           
-          echo "==== 制作完成 ===="
-          ls -hl openwrt/out/*.img.gz
+          echo "==== 编译完成，准备发布 ===="
+          # 设置一个环境变量存储当前日期，用于 Release 标签
+          echo "RELEASE_TAG=$(date +'%Y.%m.%d-%H%M')" >> $GITHUB_ENV
 
-      - name: Upload Firmware Artifact
-        uses: actions/upload-artifact@v4
+      - name: 8. 发布到 GitHub Releases
+        uses: softprops/action-gh-release@v2
         with:
-          name: OpenWrt-Firmware-s905d
-          path: amlogic-s9xxx-openwrt/openwrt/out/*.img.gz
-          compression-level: 0
-          retention-days: 7
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: OpenWrt 固件 - Amlogic s905d (${{ env.RELEASE_TAG }})
+          body: |
+            ## 固件信息
+            - 设备型号: Amlogic s905d
+            - 编译时间: ${{ env.RELEASE_TAG }}
+            - 集成插件状态:
+              - Passwall: ${{ github.event.inputs.with_passwall }}
+              - SSR-Plus: ${{ github.event.inputs.with_ssr_plus }}
+              - ZeroTier: ${{ github.event.inputs.with_zerotier }}
+            
+            **注意**：下载下方的 `.img.gz` 文件后解压烧录即可。
+          files: amlogic-s9xxx-openwrt/openwrt/out/*.img.gz
+          token: ${{ secrets.GITHUB_TOKEN }}
