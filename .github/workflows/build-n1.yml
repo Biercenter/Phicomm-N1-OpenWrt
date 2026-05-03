@@ -1,35 +1,39 @@
-name: Build and Publish OpenWrt
+name: Build OpenWrt for Amlogic s905d
 
 on:
-  push:
-    branches: [ main ] # 当代码推送到 main 分支时自动执行
-  workflow_dispatch:   # 允许在 GitHub Actions 页面手动点击触发
+  workflow_dispatch: # 允许在 GitHub Actions 页面手动点击运行
+  # push:          # 如果需要每次推送代码自动触发，取消注释此行
+  #   branches: [ "main" ]
 
 jobs:
   build:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write # 允许工作流发布 Release
-
+    runs-on: ubuntu-24.04
+    
     steps:
-      - name: 检出当前仓库代码
-        uses: actions/checkout@v4
+      - name: Maximize Build Space
+        uses: easimon/maximize-build-space@master
+        with:
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          remove-docker-images: 'true'
 
-      - name: 安装依赖环境
+      - name: Clone Repository & Install Dependencies
         run: |
-          sudo apt-get update
-          # 安装必要的工具，包含 git
-          sudo apt-get install -y python3 curl wget git
-
-      - name: 克隆 amlogic-s9xxx-openwrt 仓库
-        run: |
-          echo "正在克隆最新的 amlogic-s9xxx-openwrt 源码..."
+          echo "==== Clone Repository ===="
           git clone --depth 1 https://github.com/ophub/amlogic-s9xxx-openwrt.git
+          cd amlogic-s9xxx-openwrt
+          
+          echo "==== Install Ubuntu 24.04 Dependencies ===="
+          sudo apt-get update -y
+          sudo apt-get full-upgrade -y
+          sudo apt-get install -y $(cat make-openwrt/scripts/ubuntu2404-make-openwrt-depends)
 
-      - name: 修改 imagebuilder 配置项
+      - name: Modify Configuration and Scripts
         working-directory: amlogic-s9xxx-openwrt
         run: |
-          echo "更改 config 和 imagebuilder.sh..."
+          echo "==== 更改config/imagebuilder/config和config/imagebuilder/imagebuilder.sh ===="
           sed -i 's/^CONFIG_PACKAGE/# &/' config/imagebuilder/config
           sed -i '$a\
           CONFIG_PACKAGE_luci-app-passwall=y\
@@ -48,7 +52,7 @@ jobs:
           sed -i -E 's/\b(docker(-compose)?|dockerd)\b\s*//g' config/imagebuilder/imagebuilder.sh
           sed -i 's/tini ttyd tune2fs/tini tune2fs/g' config/imagebuilder/imagebuilder.sh
 
-      - name: 注入插件下载脚本
+      - name: Inject Plugin Download Script
         working-directory: amlogic-s9xxx-openwrt
         run: |
           cat > /tmp/insert_code.txt << 'EOF'
@@ -57,6 +61,7 @@ jobs:
               echo "-----------------------------------------------"
               echo "正在搜索 $NAME 的最新发布版本..."
               
+              # 注意：如果在 Actions 中遇到 GitHub API 速率限制，可在 workflow 环境变量中配置 GITHUB_TOKEN
               DOWNLOAD_URLS=$(curl -s https://api.github.com/repos/Biercenter/Phicomm-N1-OpenWrt/releases | \
               python3 -c "
           import sys, json
@@ -84,39 +89,38 @@ jobs:
           sed -i '/Download other luci-app-xxx/r /tmp/insert_code.txt' config/imagebuilder/imagebuilder.sh
           rm /tmp/insert_code.txt
 
-      - name: 从 Action Secret 创建自定义设置 (uci-defaults)
+      - name: Add Custom UCI Defaults
         working-directory: amlogic-s9xxx-openwrt
-        env:
-          # 读取 GitHub 仓库配置的 Secret
-          CUSTOM_SETTINGS: ${{ secrets.CUSTOM_UCI_SETTINGS }}
         run: |
-          echo "添加 files/etc/uci-defaults/zzz-custom-settings"
+          echo "==== 添加files/etc/uci-defaults/ ===="
           mkdir -p config/imagebuilder/files/etc/uci-defaults/
-          # 将 Secret 的内容直接写入文件
-          echo "$CUSTOM_SETTINGS" > config/imagebuilder/files/etc/uci-defaults/zzz-custom-settings
+          cat > config/imagebuilder/files/etc/uci-defaults/zzz-custom-settings << 'EOF'
+          cd /mnt/mmcblk2p4/uci-set/
+          ./full.sh
+          EOF
           chmod +x config/imagebuilder/files/etc/uci-defaults/zzz-custom-settings
 
-      - name: 制作 rootfs 和打包 img
+      - name: Build OpenWrt RootFS
         working-directory: amlogic-s9xxx-openwrt
         run: |
-          echo "开始制作 openwrt-armsr-armv8-generic-rootfs.tar.gz"
+          echo "==== 开始制作openwrt-armsr-armv8-generic-rootfs.tar.gz ===="
           sudo ./config/imagebuilder/imagebuilder.sh openwrt:25.12.2
-          
-          echo "开始打包 img 固件"
+
+      - name: Package Firmware
+        working-directory: amlogic-s9xxx-openwrt
+        run: |
+          echo "==== 开始打包openwrt_official_amlogic_s905d_k6.18.24_2026.04.26.img.gz ===="
           mkdir -p openwrt-armsr/
           sudo mv output/openwrt-*-rootfs.tar.gz openwrt-armsr/openwrt-armsr-armv8-generic-rootfs.tar.gz
           sudo ./remake -b s905d -k 6.18.y -p 192.168.100.1
+          
+          echo "==== 制作完成 ===="
+          ls -hl openwrt/out/*.img.gz
 
-      - name: 收集生成的固件文件
-        id: collect_firmware
-        run: |
-          # 使用通配符动态获取 out 目录下生成的 img.gz 路径
-          echo "FIRMWARE_PATH=$(ls amlogic-s9xxx-openwrt/openwrt/out/openwrt_official_amlogic_s905d_k6.18.*.img.gz | head -n 1)" >> $GITHUB_ENV
-
-      - name: 发布到 GitHub Releases
-        uses: softprops/action-gh-release@v2
+      - name: Upload Firmware Artifact
+        uses: actions/upload-artifact@v4
         with:
-          tag_name: "OpenWrt-Build-${{ github.run_number }}"
-          name: "OpenWrt S905D 自动构建 #${{ github.run_number }}"
-          files: ${{ env.FIRMWARE_PATH }}
-          body: "通过 GitHub Actions 自动构建的 OpenWrt 固件。"
+          name: OpenWrt-Firmware-s905d
+          path: amlogic-s9xxx-openwrt/openwrt/out/*.img.gz
+          compression-level: 0 # 固件已是 gz 格式，无需二次压缩
+          retention-days: 7    # 保存天数，可按需修改
