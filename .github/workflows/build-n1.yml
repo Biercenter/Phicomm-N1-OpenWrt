@@ -2,22 +2,22 @@ name: Build OpenWrt for Amlogic s905d
 
 on:
   workflow_dispatch: # 允许在 GitHub Actions 页面手动点击运行
-  # push:          # 如果需要每次推送代码自动触发，取消注释此行
-  #   branches: [ "main" ]
 
 jobs:
   build:
     runs-on: ubuntu-24.04
     
     steps:
-      - name: Maximize Build Space
-        uses: easimon/maximize-build-space@master
+      - name: Free Disk Space
+        uses: jlumbroso/free-disk-space@main
         with:
-          remove-dotnet: 'true'
-          remove-android: 'true'
-          remove-haskell: 'true'
-          remove-codeql: 'true'
-          remove-docker-images: 'true'
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
 
       - name: Clone Repository & Install Dependencies
         run: |
@@ -28,6 +28,8 @@ jobs:
           echo "==== Install Ubuntu 24.04 Dependencies ===="
           sudo apt-get update -y
           sudo apt-get install -y $(cat make-openwrt/scripts/ubuntu2404-make-openwrt-depends)
+          # 清理 apt 缓存，进一步节约磁盘空间
+          sudo apt-get clean 
 
       - name: Modify Configuration and Scripts
         working-directory: amlogic-s9xxx-openwrt
@@ -60,7 +62,6 @@ jobs:
               echo "-----------------------------------------------"
               echo "正在搜索 $NAME 的最新发布版本..."
               
-              # 注意：如果在 Actions 中遇到 GitHub API 速率限制，可在 workflow 环境变量中配置 GITHUB_TOKEN
               DOWNLOAD_URLS=$(curl -s https://api.github.com/repos/Biercenter/Phicomm-N1-OpenWrt/releases | \
               python3 -c "
           import sys, json
@@ -121,5 +122,5 @@ jobs:
         with:
           name: OpenWrt-Firmware-s905d
           path: amlogic-s9xxx-openwrt/openwrt/out/*.img.gz
-          compression-level: 0 # 固件已是 gz 格式，无需二次压缩
-          retention-days: 7    # 保存天数，可按需修改
+          compression-level: 0
+          retention-days: 7
