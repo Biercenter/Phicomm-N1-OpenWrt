@@ -108,24 +108,24 @@ jobs:
           PLUGINS=($PLUGIN_LIST_STR)
           for NAME in "\${PLUGINS[@]}"; do
               echo "-----------------------------------------------"
-              echo "正在搜索 \$NAME (armsr-armv8) 的最新发布版本..."
+              echo "正在搜索 \$NAME (armsr-armv8) 的【最新】发布版本..."
               DOWNLOAD_URLS=\$(curl -s https://api.github.com/repos/Biercenter/Phicomm-N1-OpenWrt/releases | \\
               python3 -c "
           import sys, json
           data = json.load(sys.stdin)
           for release in data:
-              # 核心修改：确保发布标题中同时包含插件名 '\$NAME' 和目标架构 'armsr-armv8'
+              # 由于 GitHub API 默认按时间倒序排列，第一个匹配到的即为最新版本
               if '\$NAME' in release['name'] and 'armsr-armv8' in release['name']:
                   for asset in release['assets']:
                       if asset['name'].endswith('.apk'):
                           print(asset['browser_download_url'])
-                  # 找到符合要求的对应架构版本后，立即跳出循环
+                  # 核心拦截逻辑：找到最新版本后，使用 break 立即跳出外层循环，忽略旧版本
                   break
               ")
               if [ -z "\$DOWNLOAD_URLS" ]; then
                   echo "❌ 未找到 \$NAME (armsr-armv8) 的相关 apk 文件。"
               else
-                  echo "✅ 找到 \$NAME (armsr-armv8) 的文件，开始下载..."
+                  echo "✅ 成功锁定 \$NAME (armsr-armv8) 最新版本，开始下载..."
                   echo "\$DOWNLOAD_URLS" | xargs -n 1 wget -q --show-progress -nc
               fi
           done
