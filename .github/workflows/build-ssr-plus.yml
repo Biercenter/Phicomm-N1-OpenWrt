@@ -7,7 +7,7 @@ on:
         description: '🎯 OpenWrt SDK 下载链接 (.tar.zst)'
         required: true
         type: string
-        default: 'https://downloads.openwrt.org/releases/25.12.2/targets/armsr/armv8/openwrt-sdk-25.12.2-armsr-armv8_gcc-14.3.0_musl.Linux-x86_64.tar.zst'
+        default: 'https://downloads.openwrt.org/releases/25.12.3/targets/armsr/armv8/openwrt-sdk-25.12.3-armsr-armv8_gcc-14.3.0_musl.Linux-x86_64.tar.zst'
       arch_name:
         description: '🏷️ 架构名称'
         required: true
