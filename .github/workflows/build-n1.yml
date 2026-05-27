@@ -171,7 +171,7 @@ jobs:
       - name: 8. 发布到 GitHub Releases
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ env.RELEASE_TAG }}
+          tag_name: openwrt_official_amlogic_s905d_${{ env.RELEASE_TAG }}
           name: OpenWrt 固件 - Amlogic s905d (${{ env.RELEASE_TAG }})
           body: |
             ## 固件信息
