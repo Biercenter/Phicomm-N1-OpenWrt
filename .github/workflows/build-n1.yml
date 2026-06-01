@@ -180,10 +180,9 @@ jobs:
             - OpenWrt 版本: ${{ github.event.inputs.openwrt_version }}
             - 编译时间: ${{ env.RELEASE_TAG }}
             - 集成插件状态:
-              - Passwall: ${{ github.event.inputs.with_passwall }}
-              - SSR-Plus: ${{ github.event.inputs.with_ssr_plus }}
-              - ZeroTier: ${{ github.event.inputs.with_zerotier }}
-            
+              - Passwall: ${{ github.event.inputs.with_passwall == 'true' && '✔' || '❌' }}
+              - SSR-Plus: ${{ github.event.inputs.with_ssr_plus == 'true' && '✔' || '❌' }}
+              - ZeroTier: ${{ github.event.inputs.with_zerotier == 'true' && '✔' || '❌' }}
             **注意**：下载下方的 `.img.gz` 文件后解压烧录即可。
           files: amlogic-s9xxx-openwrt/openwrt/out/*.img.gz
           token: ${{ secrets.GITHUB_TOKEN }}
