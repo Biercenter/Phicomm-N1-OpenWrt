@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       openwrt_version:
-        description: 'OpenWrt 版本号 (输入格式如: 25.12.3)'
+        description: 'OpenWrt 版本号 (输入格式如: 25.12.4)'
         required: true
-        default: '25.12.3'
+        default: '25.12.4'
         type: string
       with_passwall:
         description: '是否集成 Passwall'
@@ -152,7 +152,7 @@ jobs:
         working-directory: amlogic-s9xxx-openwrt
         run: |
           echo "==== 正在通过 ImageBuilder 制作 RootFS ===="
-          # 使用用户输入的版本号，默认为 25.12.3
+          # 使用用户输入的版本号，默认为 25.12.4
           sudo ./config/imagebuilder/imagebuilder.sh openwrt:${{ github.event.inputs.openwrt_version }}
 
       - name: 7. 打包成 Amlogic 写入镜像 (.img.gz)
