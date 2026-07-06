@@ -73,6 +73,7 @@ jobs:
             echo "CONFIG_PACKAGE_luci-i18n-commands-zh-cn=y"
             echo "CONFIG_PACKAGE_luci-i18n-acme-zh-cn=y"
             echo "CONFIG_PACKAGE_acme-acmesh-dnsapi=y"
+            echo "CONFIG_PACKAGE_sshpass=y"
           } >> $CONFIG_FILE
 
           # 根据 Actions 页面勾选情况添加插件
