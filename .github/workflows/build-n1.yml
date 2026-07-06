@@ -71,6 +71,8 @@ jobs:
             echo "CONFIG_PACKAGE_kmod-nft-tproxy=y"
             echo "CONFIG_PACKAGE_kmod-nft-socket=y"
             echo "CONFIG_PACKAGE_luci-i18n-commands-zh-cn=y"
+            echo "CONFIG_PACKAGE_luci-i18n-acme-zh-cn=y"
+            echo "CONFIG_PACKAGE_acme-acmesh-dnsapi=y"
           } >> $CONFIG_FILE
 
           # 根据 Actions 页面勾选情况添加插件
