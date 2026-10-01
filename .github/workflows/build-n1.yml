@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       openwrt_version:
-        description: 'OpenWrt 版本号 (输入格式如: 25.12.4)'
+        description: 'OpenWrt 版本号 (输入格式如: 25.12.5)'
         required: true
-        default: '25.12.4'
+        default: '25.12.5'
         type: string
       with_passwall:
         description: '是否集成 Passwall'
