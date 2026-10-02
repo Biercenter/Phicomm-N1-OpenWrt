@@ -74,13 +74,15 @@ jobs:
         run: |
           echo "src-git helloworld ${{ env.HELLOWORLD_REPO }};${{ inputs.source_branch }}" >> feeds.conf.default
 
-      - name: Update and Install Feeds
+      - name: 更新 Feeds 并替换最新版Golang
         working-directory: ./sdk_dir
         run: |
           ./scripts/feeds update -a
-          curl https://raw.githubusercontent.com/openwrt/packages/2a70ef94898443549229e15b38b3c20bfaf4895c/lang/golang/golang1.27/Makefile > feeds/packages/lang/golang/golang1.26/Makefile
-          curl https://raw.githubusercontent.com/openwrt/packages/2a70ef94898443549229e15b38b3c20bfaf4895c/lang/golang/golang1.27/test-version.sh > feeds/packages/lang/golang/golang1.26/test-version.sh
-          curl https://raw.githubusercontent.com/openwrt/packages/2a70ef94898443549229e15b38b3c20bfaf4895c/lang/golang/golang1.27/test.sh > feeds/packages/lang/golang/golang1.26/test.sh
+          cd feeds/packages
+          git checkout FETCH_HEAD -- lang/golang
+          cd ../..
+          ./scripts/feeds update -i packages
+          ./scripts/feeds install -f -p packages golang
           ./scripts/feeds install -a -f -p helloworld
 
       - name: Generate Defconfig
