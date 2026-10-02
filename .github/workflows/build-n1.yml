@@ -1,4 +1,4 @@
-name: 制作 Amlogic s905d OpenWrt 固件
+name: 制作 Phicomm N1 OpenWrt 固件
 
 on:
   workflow_dispatch:
