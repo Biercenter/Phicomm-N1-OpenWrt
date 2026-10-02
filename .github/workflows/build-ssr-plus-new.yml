@@ -100,6 +100,8 @@ jobs:
         run: |
           # 优先使用多核编译，失败则输出详细日志
           make package/luci-app-ssr-plus/compile -j$(nproc) || make package/luci-app-ssr-plus/compile -j1 V=s
+          make package/xray-core/compile -j$(nproc) || make package/xray-core/compile -j1 V=s
+          make package/mihomo/compile -j$(nproc) || make package/mihomo/compile -j1 V=s
 
       - name: Collect Output Files
         run: |
