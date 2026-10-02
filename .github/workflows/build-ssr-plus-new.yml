@@ -77,36 +77,21 @@ jobs:
       - name: Update and Install Feeds
         working-directory: ./sdk_dir
         run: |
-          # 修复 curl 循环依赖：先更新，删除冲突包，再安装
           ./scripts/feeds update -a
-          # rm -rf feeds/packages/net/curl
           ./scripts/feeds install -a -f -p helloworld
 
       - name: Generate Defconfig
         working-directory: ./sdk_dir
         run: |
          touch .config
-         
-         # 1. 禁用全量编译
-         sed -i 's/CONFIG_ALL=y/# CONFIG_ALL is not set/' .config
-         sed -i 's/CONFIG_ALL_KMODS=y/# CONFIG_ALL_KMODS is not set/' .config
-         sed -i 's/CONFIG_ALL_NONSHARED=y/# CONFIG_ALL_NONSHARED is not set/' .config
-          
-         # 2. 开启中文语言支持
-         echo "CONFIG_LUCI_LANG_zh_Hans=y" >> .config
-          
-          # 3. 精简ssr-plus
-          echo "CONFIG_PACKAGE_luci-app-ssr-plus=m" >> .config
-          # echo "CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Xray=y" >> .config
-          # echo "CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Mihomo=y" >> .config
-          # echo "CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Shadowsocks_NONE_Client=y" >> .config
-          # echo "CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Shadowsocks_NONE_Server=y" >> .config
-          # echo "# CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Shadowsocks_Rust_Client is not set" >> .config
-          # echo "# CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Shadowsocks_Rust_Server is not set" >> .config
-          # echo "# CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Shadowsocks_Simple_Obfs is not set" >> .config
-          # echo "# CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Shadowsocks_V2ray_Plugin is not set" >> .config
-          # echo "# CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_ShadowsocksR_Libev_Client is not set" >> .config
-          # echo "# CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_ShadowsocksR_Libev_Server is not set" >> .config
+         echo '# CONFIG_ALL is not set' > .config
+         echo '# CONFIG_ALL_KMODS is not set' >> .config
+         echo '# CONFIG_ALL_NONSHARED is not set' >> .config
+         echo 'CONFIG_LUCI_LANG_zh_Hans=y' >> .config
+         echo 'CONFIG_PACKAGE_luci-app-ssr-plus=m' >> .config
+         echo 'CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Xray=y' >> .config
+         echo 'CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_NONE_V2RAY=n' >> .config
+         echo 'CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_ShadowsocksR_Libev_Client=n' >> .config
           
           make defconfig
 
