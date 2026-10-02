@@ -78,6 +78,9 @@ jobs:
         working-directory: ./sdk_dir
         run: |
           ./scripts/feeds update -a
+          curl https://raw.githubusercontent.com/openwrt/packages/2a70ef94898443549229e15b38b3c20bfaf4895c/lang/golang/golang1.27/Makefile > feeds/packages/lang/golang/golang1.26/Makefile
+          curl https://raw.githubusercontent.com/openwrt/packages/2a70ef94898443549229e15b38b3c20bfaf4895c/lang/golang/golang1.27/test-version.sh > feeds/packages/lang/golang/golang1.26/test-version.sh
+          curl https://raw.githubusercontent.com/openwrt/packages/2a70ef94898443549229e15b38b3c20bfaf4895c/lang/golang/golang1.27/test.sh > feeds/packages/lang/golang/golang1.26/test.sh
           ./scripts/feeds install -a -f -p helloworld
 
       - name: Generate Defconfig
