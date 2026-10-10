@@ -115,9 +115,10 @@ jobs:
           ln -s ../../hostpkg/lib/go-1.27/bin/go staging_dir/host/bin/go
           ln -s ../../hostpkg/lib/go-1.27/bin/gofmt staging_dir/host/bin/gofmt
           ./staging_dir/host/bin/go version
-          make package/luci-app-ssr-plus/compile -j$(nproc) || make package/luci-app-ssr-plus/compile -j1 V=s
           make package/xray-core/compile -j$(nproc) || make package/xray-core/compile -j1 V=s
-          make package/mihomo/compile -j$(nproc) || make package/mihomo/compile -j1 V=s
+          make package/mihomo/compile -j$(nproc) || make package/feeds/helloworld/mihomo/compile V=s
+          # make package/mihomo/compile -j$(nproc) || make package/mihomo/compile -j1 V=s
+          make package/luci-app-ssr-plus/compile -j$(nproc) || make package/luci-app-ssr-plus/compile -j1 V=s
 
       - name: Collect Output Files
         run: |
