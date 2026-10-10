@@ -78,11 +78,15 @@ jobs:
         working-directory: ./sdk_dir
         run: |
           ./scripts/feeds update -a
-          cd feeds/packages
-          git checkout FETCH_HEAD -- lang/golang
-          cd ../..
-          ./scripts/feeds update -i packages
-          ./scripts/feeds install -f -p packages golang
+          cd feeds/packages/lang
+          rm -rf golang
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/openwrt/packages.git tmp_packages
+          cd tmp_packages
+          git sparse-checkout set lang/golang
+          cd ..
+          mv tmp_packages/lang/golang ./
+          rm -rf tmp_packages
+          cd ../../../
           ./scripts/feeds install -a -f -p helloworld
 
       - name: Generate Defconfig
