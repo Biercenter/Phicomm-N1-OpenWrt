@@ -1,4 +1,4 @@
-name: 编译新版SSR-PLUS
+name: 编译 luci-app-ssr-plus
 
 on:
   workflow_dispatch:
