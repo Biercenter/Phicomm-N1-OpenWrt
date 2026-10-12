@@ -97,6 +97,7 @@ jobs:
          echo 'CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Mihomo=y' >> .config
          echo 'CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_GeoData=y' >> .config
          echo 'CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_ShadowsocksR_Libev_Client=n' >> .config
+         echo 'CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Http_Proxy=n' >> .config
          echo 'CONFIG_PACKAGE_mihomo=y' >> .config
          echo 'CONFIG_PACKAGE_xray-core=y' >> .config
          make defconfig
