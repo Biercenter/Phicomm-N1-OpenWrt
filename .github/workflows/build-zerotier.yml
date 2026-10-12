@@ -1,4 +1,4 @@
-name: Build luci-app-zerotier
+name: 编译 luci-app-zerotier
 
 on:
   workflow_dispatch:
