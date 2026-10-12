@@ -78,16 +78,9 @@ jobs:
         working-directory: ./sdk_dir
         run: |
           ./scripts/feeds update -a
-          cd feeds/packages/lang
-          rm -rf golang
-          git clone --depth 1 --filter=blob:none --sparse https://github.com/openwrt/packages.git tmp_packages
-          cd tmp_packages
-          git sparse-checkout set lang/golang
-          cd ..
-          mv tmp_packages/lang/golang ./
-          rm -rf tmp_packages
-          cd ../../../
           ./scripts/feeds install -a -f -p helloworld
+          rm -rf feeds/packages/lang/golang
+          git clone https://github.com/sbwml/packages_lang_golang -b 27.x feeds/packages/lang/golang
 
       - name: Generate Defconfig
         working-directory: ./sdk_dir
@@ -112,13 +105,6 @@ jobs:
         working-directory: ./sdk_dir
         run: |
           # 优先使用多核编译，失败则输出详细日志
-          wget -qO go1.27.1.linux-amd64.tar.gz https://go.dev/dl/go1.27.1.linux-amd64.tar.gz
-          mkdir -p staging_dir/hostpkg/lib/go-1.27
-          tar -xzf go1.27.1.linux-amd64.tar.gz -C staging_dir/hostpkg/lib/go-1.27 --strip-components=1
-          rm -f staging_dir/host/bin/go staging_dir/host/bin/gofmt
-          ln -s ../../hostpkg/lib/go-1.27/bin/go staging_dir/host/bin/go
-          ln -s ../../hostpkg/lib/go-1.27/bin/gofmt staging_dir/host/bin/gofmt
-          ./staging_dir/host/bin/go version
           make package/xray-core/compile -j$(nproc) || make package/xray-core/compile -j1 V=s
           make package/mihomo/compile -j$(nproc) || make package/feeds/helloworld/mihomo/compile V=s
           # make package/mihomo/compile -j$(nproc) || make package/mihomo/compile -j1 V=s
