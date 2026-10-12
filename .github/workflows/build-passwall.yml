@@ -1,4 +1,4 @@
-name: Build luci-app-passwall
+name: 编译 luci-app-passwall
 
 on:
   workflow_dispatch:
