@@ -12,7 +12,7 @@ on:
         description: '是否集成 Passwall'
         required: false
         type: boolean
-        default: true
+        default: false
       with_ssr_plus:
         description: '是否集成 SSR-Plus'
         required: false
